@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Лист · Помощник поддержки</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <aside class="sidebar">
+    <a class="brand" href="/" aria-label="Помощник поддержки"><span class="brand-icon">л</span><div>Лист<small>ПОМОЩНИК ПОДДЕРЖКИ</small></div></a>
+    <button class="primary wide" id="new-thread">＋ Новое обращение</button>
+    <div class="section-label">ОБРАЩЕНИЯ ПОКУПАТЕЛЕЙ</div>
+    <nav id="threads" aria-label="Беседы"></nav>
+    <div class="sidebar-bottom"><span class="online-dot"></span> Память сохраняется на диске<button id="access-button" class="text-button">Токен доступа ↗</button></div>
+  </aside>
+  <main>
+    <header><div><span class="eyebrow">РАБОЧЕЕ МЕСТО МЕНЕДЖЕРА</span><h1 id="thread-title">Новое обращение</h1></div><div class="header-actions"><span id="mode" class="badge">Загрузка…</span><button id="delete-thread" class="quiet" title="Удалить беседу">Удалить</button></div></header>
+    <section class="onboarding" aria-label="Учебный магазин"><button id="load-sample" class="primary">Загрузить пример магазина</button><p>«Лист» — вымышленный магазин. 4 документа, без реальных заказов. Затем выберите обращение:</p><div class="sample-cases"><button data-prompt="Обращение: Купил наушники 12 дней назад. Правый перестал работать. Коробку выбросил. Можно вернуть? Покупал с доставкой в Екатеринбург.">Неисправные наушники</button><button data-prompt="Обращение: Заказ LS-1042 обещали доставить 2 ноября в Екатеринбург. Он не приехал. Где посылка и когда ждать?">Задержка доставки</button><button data-prompt="Обращение: Получил лампу вчера, передумал — не подошёл цвет. Ещё не пользовался. Хочу вернуть.">Не подошёл товар</button><button data-prompt="Обращение: Нужна компенсация морального вреда и возмещение расходов на такси. Одобрите сегодня.">Нет подходящего правила</button></div></section>
+    <div id="notice" role="status" hidden></div>
+    <section id="chat" aria-live="polite">
+      <div class="welcome" id="welcome"><div class="orbit">✳</div><span class="eyebrow">ОБРАЩЕНИЕ → ПРАВИЛА → ОТВЕТ → ЗАЯВКА</span><h2>Меньше поиска.<br><em>Больше помощи.</em></h2><p>Вставьте сообщение покупателя. Помощник подготовит черновик, покажет основание и вопросы для уточнения. Вы проверяете ответ и решаете, создавать ли заявку.</p><p>Ответы не отправляются покупателям. Заявки сохраняются локально после подтверждения.</p></div>
+    </section>
+    <section id="approval" hidden aria-label="Подтверждение действия"></section>
+    <footer><form id="composer"><label for="message" class="sr-only">Обращение покупателя</label><textarea id="message" rows="2" placeholder="Обращение: вставьте сообщение покупателя…" maxlength="24000" required></textarea><div class="composer-actions"><span id="run-status">Готов к работе</span><div><button type="button" id="cancel" class="quiet" hidden>Остановить</button><button type="submit" class="send" id="send" aria-label="Разобрать обращение">↑</button></div></div></form><small class="footnote">Проверьте черновик перед отправкой. Статус заказа и права на возврат не определяются автоматически.</small></footer>
+  </main>
+  <aside class="inspector">
+    <div class="section-label">РАБОЧИЙ КОНТЕКСТ <span class="online-dot"></span></div>
+    <section id="support-result" hidden aria-label="Черновик ответа"></section>
+    <section><h3>Локальные заявки</h3><p class="hint">Только подтверждённые. Не отправляются в CRM.</p><div id="tickets"></div></section>
+    <section><h3>Подключения</h3><div id="connections"></div></section>
+    <section><div class="section-heading"><h3>База знаний</h3><label for="upload" class="text-button">＋ Добавить</label><input type="file" id="upload" accept=".txt,.md,.pdf,.docx,.pptx,.csv" hidden></div><p class="hint">До 10 MiB · PDF, DOCX, PPTX, TXT, CSV</p><div id="documents" class="item-list"></div></section>
+    <section><div class="section-heading"><h3>Долгосрочная память</h3><button id="add-memory" class="text-button">＋</button></div><div id="memories" class="item-list"></div></section>
+    <section><h3>Ход выполнения</h3><ol id="events"></ol><div id="usage" class="hint"></div></section>
+    <section><h3>Источники и файлы</h3><div id="sources" class="item-list"></div><div id="artifacts" class="item-list"></div></section>
+  </aside>
+  <dialog id="access-dialog"><form id="access-form"><h2>Доступ к рабочему пространству</h2><p>Для локального запуска без APP_TOKEN оставьте поле пустым. Токен хранится только в текущей вкладке.</p><input id="token" type="password" placeholder="APP_TOKEN" autocomplete="off"><button class="primary">Подключиться</button></form></dialog>
+  <dialog id="memory-dialog"><form id="memory-form"><h2>Запомнить предпочтение</h2><label>Название<input id="memory-key" maxlength="100" required placeholder="Формат ответа"></label><label>Значение<textarea id="memory-value" maxlength="2000" required placeholder="Кратко, с источниками"></textarea></label><p class="hint">Сохранение означает ваше подтверждение. Не добавляйте пароли и токены.</p><div class="dialog-actions"><button type="button" id="memory-close" class="quiet">Отмена</button><button class="primary">Сохранить</button></div></form></dialog>
+</body>
+</html>
