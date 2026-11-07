@@ -1,0 +1,1955 @@
+## Slide 1
+Разработка агентов
+‹#›
+## Slide 2
+‹#›
+
+Компоненты агента
+Реализация памяти агента
+Middleware для улучшения работы агента. Прерывание агента.
+Защита агента на уязвимости
+Конструирование инструментов агента
+Построение агента в цепочке LangGraph
+
+Содержание
+## Slide 3
+Схема работы агента
+‹#›
+## Slide 4
+‹#›
+Компоненты агента
+## Slide 5
+‹#›
+Модель в агентной системе
+Static model
+Dynamic model
+from langchain.agents import create_agent
+from langchain_openai import ChatOpenAI
+
+model = ChatOpenAI(
+    model="gpt-5",
+    temperature=0.1,
+    max_tokens=1000,
+    timeout=30
+    # ... (other params)
+)
+agent = create_agent(model, tools=tools)
+@wrap_model_call
+def dynamic_model_selection(request: ModelRequest, handler):
+    message_count = len(request.state["messages"])
+    # tool_name = request.state["tool"]
+    if message_count > 10:
+        # Use an advanced model for longer conversations
+        model = advanced_model
+    else:
+        model = basic_model
+    return handler(request.override(model=model))
+
+agent = create_agent(
+    model=basic_model,  # Default model
+    tools=tools,
+    middleware=[dynamic_model_selection])
+Всегда одна и таже модель выполняет все действия
+Модель может меняться в процессе выполнения сценария
+create_agent - позволяет создавать агентов!
+
+
+
+## Slide 6
+‹#›
+Модель в агентной системе
+Dynamic model
+Может быть полезно:
+при анализе длительного диалога (когда необходимо большое контекстное окно)
+при выполнении более простых/сложных действий
+
+Основная цель:
+	Более эффективное распределение сил на выполнение различного типа сложности задач - сокращение затрат
+Отслеживать выбранную модель вы также можете с помощью трекинга - LangSmith/LangFuse
+
+Static model
+Dynamic model
+ Поведение
+Фиксированное
+Меняется по задаче
+ Скорость
+Быстрее
+Может быть медленнее
+ Стоимость
+Ниже
+Оптимизируется под задачу
+ Гибкость
+Низкая
+Высокая
+ Сложность
+Простая реализация
+Более сложная архитектура
+
+## Slide 7
+‹#›
+Инструменты агента
+Инструмент - это функция с декоратором @tool, который позволяет агенту интерпретировать функцию, как инструмент, который она может выполнять и анализировать
+Тип
+Пример инструмента
+Что делает
+ Поиск
+Web Search API
+Ищет актуальную информацию в интернете
+ Вычисления
+Calculator / Python tool
+Считает формулы, анализирует данные
+ Работа с файлами
+File Reader
+Читает PDF, CSV, DOCX
+База данных
+SQL Tool
+Делает запросы к БД
+Интеграции
+CRM / Notion API
+Получает и записывает данные во внешние сервисы
+## Slide 8
+‹#›
+Инструменты агента
+@tool
+def get_weather(city: str) -> str:
+url = "https://api.openweathermap.org/data/2.5/weather"
+params = {
+"q": city,
+"appid": API_KEY,
+}
+
+response = requests.get(url, params=params)
+data = response.json()
+temp = data["main"]["temp"]
+description = data["weather"][0]["description"]
+return f"Погода в {city}: {temp}°C, {description}"
+agent = create_agent(model, tools=[get_weather])
+@tool
+def search(query: str) -> str:
+    """Search for information."""
+    return f"Results for: {query}"
+
+@tool
+def get_weather(location: str) -> str:
+    """Get weather information for a location."""
+    return f"Weather in {location}: Sunny, 72°F"
+
+agent = create_agent(model, tools=[search, get_weather])
+Один инструмент
+Несколько инструментов
+
+
+Примеры инструментов - Static Tools - Фиксированные инструменты
+## Slide 9
+‹#›
+Инструменты агента
+Примеры инструментов - Dynamic Tools - Динамические инструменты
+Основная идея: Мы задаем условие при котором, ограничиваем набор инструментов, которые “видит” агент. 
+Особенно важно для задач, где более 100 инструментов - чтобы сократить время работы агента.
+from langchain.agents.middleware import wrap_model_call, ModelRequest, ModelResponse
+from typing import Callable
+
+@wrap_model_call
+def state_based_tools(
+    request: ModelRequest,
+    handler: Callable[[ModelRequest], ModelResponse]
+) -> ModelResponse:
+    """Filter tools based on conversation State."""
+    # Read from State: check if user has authenticated
+    state = request.state
+    is_authenticated = state.get("authenticated", False)
+    message_count = len(state["messages"])
+    # Only enable sensitive tools after authentication
+    if not is_authenticated:
+        tools = [t for t in request.tools if t.name.startswith("public_")]
+        request = request.override(tools=tools)
+    elif message_count < 5:
+        # Limit tools early in conversation
+        tools = [t for t in request.tools if t.name != "advanced_search"]
+        request = request.override(tools=tools)
+    return handler(request)
+
+agent = create_agent(
+    model="gpt-4.1",
+    tools=[public_search, private_search, advanced_search],
+    middleware=[state_based_tools])
+Вы можете задать любое условие для ограничения списка инструментов. Это также может быть полезно для ограничения функционала для определенных пользователей (админ, пользователь, владелец и тп)
+
+## Slide 10
+Инструменты агента
+Продвинутая работа с инструментами
+Обработка ошибок - Tool error handling
+from langchain.agents import create_agent
+from langchain.agents.middleware import wrap_tool_call
+from langchain.messages import ToolMessage
+
+
+@wrap_tool_call
+def handle_tool_errors(request, handler):
+    """Handle tool execution errors with custom messages."""
+    try:
+        return handler(request)
+    except Exception as e:
+        # Return a custom error message to the model
+        return ToolMessage(
+            content=f"Tool error: Please check your input and try again. ({str(e)})",
+            tool_call_id=request.tool_call["id"]
+        )
+
+agent = create_agent(
+    model="gpt-4.1",
+    tools=[search, get_weather],
+    middleware=[handle_tool_errors])
+Формат вывода:
+Позволяет сформировать кастомный текст ошибки, чтобы пользователь получил более понятную для него расшифровку ошибки
+
+
+## Slide 11
+Место LLM в агентной системе
+Важно! Работа модели происходит в два этапа: 1) Выбор инструмента, 2) Выполнение Инструмента
+Выполнение результата инструмента может проводить другая модель (например, слабая модель - для экономии ресурсов) 
+
+С LLM можно работать как по API, так и запускать ее локально, при построении агентной системы
+## Slide 12
+‹#›
+Системный промпт в агентской системе
+Системный промпт является важной составляющей в агентской системе, поскольку задает поведение агента и основной контекст, который агент должен использовать
+Указывается системный промпт при создании агента
+
+agent = create_agent(
+    model,
+    tools,
+    system_prompt="You are a helpful assistant. Be concise and accurate.")
+agent = create_agent(
+    model="anthropic:claude-sonnet-4-5",
+    system_prompt=SystemMessage(
+        content=[
+            {
+                "type": "text",
+                "text": "You are an AI assistant tasked with analyzing literary works.",
+            },)
+Это может быть str или System Message
+from langchain.agents import create_agent
+from langchain.agents.middleware import dynamic_prompt, ModelRequest
+
+@dynamic_prompt
+def user_role_prompt(request: ModelRequest) -> str:
+    """Generate system prompt based on user role."""
+    user_role = request.runtime.context.get("user_role", "user")
+    base_prompt = "You are a helpful assistant."
+    if user_role == "expert":
+        return f"{base_prompt} Provide detailed technical responses."
+    return base_prompt
+
+agent = create_agent(
+    model="gpt-4.1",
+    tools=[web_search],
+    middleware=[user_role_prompt])
+
+
+Динамический промпт
+## Slide 13
+‹#›
+Advanced Concepts: Structured Output
+Структурированный ответ агента. 
+Позволяет исключить нежелательные ответы модели и всегда получать их в необходимом нам формате. Отвечает за это параметр - response_format, его необходимо использовать совместно с 
+ToolStrategy
+from pydantic import BaseModel
+from langchain.agents import create_agent
+from langchain.agents.structured_output import ToolStrategy
+
+
+class ContactInfo(BaseModel):
+    name: str
+    email: str
+    phone: str
+
+agent = create_agent(
+    model="gpt-4.1-mini",
+    tools=[search_tool],
+    response_format=ToolStrategy(ContactInfo)
+)
+
+Pydantic Schema - позволяет задать основные поля, содержащиеся в ответе модели
+
+Формат ответа:
+ContactInfo(name='John Doe', email='john@example.com', phone='(555) 123-4567')
+Мы можем обратиться по названиям атрибутов и достать соответствующие значения name, email, phone
+
+## Slide 14
+‹#›
+Advanced Concepts: Memory (Short-term)
+Short-term memory - краткосрочная память, 
+информация о беседе храниться в рамках одной сессии.
+Применение:
+ используется в рамках одного потока/сессии, где несколько взаимодействий объединяются, как письма в одной цепочке.
+Проблемы без неё:
+ нет сохранения истории беседы.
+Особенности работы:
+ чат-модели обрабатывают сообщения (системные инструкции + пользовательский ввод), список сообщений растёт со временем.
+Решение проблем:
+ можно «забывать» устаревшую информацию или удалять старые сообщения, чтобы сохранить производительность и точность.
+Как подключить:
+ при создании агента указывают 
+checkpointer=
+InMemorySaver
+ для сохранения краткосрочной памяти.
+from langchain.agents import create_agent
+from langgraph.checkpoint.memory import InMemorySaver  
+
+
+agent = create_agent(
+    "gpt-5",
+    tools=[get_user_info],
+    checkpointer=InMemorySaver(),  
+)
+
+agent.invoke(
+    {"messages": [{"role": "user", "content": "Hi! My name is Bob."}]},
+    {"configurable": {"thread_id": "1"}},  
+)
+Для тестирования агента:
+
+## Slide 15
+‹#›
+Advanced Concepts: Memory (
+Short
+-term)
+Позволяет хранить историю диалог
+ов
+ для каждого пользователя без ее потери при перезапуске и сбоях работы агента.
+pip install langgraph-checkpoint-postgres
+from langchain.agents import create_agent
+
+from langgraph.checkpoint.postgres import PostgresSaver  
+или 
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+
+DB_URI = "postgresql://postgres:postgres@localhost:5442/postgres?sslmode=disable"
+with PostgresSaver.from_conn_string(DB_URI) as checkpointer:
+    checkpointer.setup() # auto create tables in PostgresSql
+    agent = create_agent(
+        "gpt-5",
+        tools=[get_user_info],
+        checkpointer=checkpointer,  
+    )
+pip install langgraph-checkpoint-sqlite
+Можем хранить различные параметры от состояния к состоянию!
+class CustomAgentState(AgentState):  
+    user_id: str
+    preferences: dict
+
+agent = create_agent(
+    "gpt-5",
+    tools=[get_user_info],
+    state_schema=CustomAgentState,  
+    checkpointer=InMemorySaver(),
+)
+
+# Custom state can be passed in invoke
+result = agent.invoke(
+    {
+        "messages": [{"role": "user", "content": "Hello"}],
+        "user_id": "user_123",  
+        "preferences": {"theme": "dark"}  
+    },
+    {"configurable": {"thread_id": "1"}})
+https://dashboard.sqlitecloud.io
+## Slide 16
+‹#›
+Advanced Concepts: Memory (
+Long
+-term)
+from langgraph.checkpoint.postgres import PostgresSaver
+from langgraph.store.postgres import PostgresStore
+
+with (
+    PostgresSaver.from_conn_string(DB_URI) as checkpointer,
+    PostgresStore.from_conn_string(DB_URI) as store,
+):
+    checkpointer.setup()
+    store.setup()
+
+    agent = create_agent(
+        model="gpt-5",
+        tools=[save_user_info, get_user_info],
+        checkpointer=checkpointer,  # Short-term memory
+        store=store,                # Long-term memory
+        context_schema=Context,
+        system_prompt=’’,
+    )
+## Slide 17
+Advanced Concepts: Memory
+При работе с памятью важно ограничивать число сообщений, чтобы не превысить размер контекстного окна
+## Slide 18
+Advanced Concepts: Memory
+При работе с памятью важно ограничивать число сообщений, чтобы не превысить размер контекстного окна
+Trim messages
+Зачем:
+ LLM имеют ограничение на длину контекста (в токенах).
+Как работает:
+ отслеживается количество токенов в истории сообщений, и при приближении к лимиту старые сообщения обрезаются.
+Инструменты:
+ в LangChain есть утилита 
+trim messages
+, где можно указать:
+сколько токенов оставить
+стратегию обрезки (например, оставлять последние 
+max_tokens
+)
+Применение в агенте:
+ обрезка истории выполняется через декоратор 
+@before_model
+ в middleware.
+@before_model
+def trim_messages(state: AgentState, runtime: Runtime) -> dict[str, Any] | None:
+    """Keep only the last few messages to fit context window."""
+    messages = state["messages"]
+
+    if len(messages) <= 3:
+        return None  # No changes needed
+
+    first_msg = messages[0]
+    recent_messages = messages[-3:] if len(messages) % 2 == 0 else messages[-4:]
+    new_messages = [first_msg] + recent_messages
+
+    return {
+        "messages": [
+            RemoveMessage(id=REMOVE_ALL_MESSAGES),
+            *new_messages
+        ]
+    }
+
+agent = create_agent(
+    your_model_here,
+    tools=your_tools_here,
+    middleware=[trim_messages],
+    checkpointer=InMemorySaver(),
+)
+
+## Slide 19
+Advanced Concepts: Memory
+При работе с памятью важно ограничивать число сообщений, чтобы не превысить размер контекстного окна
+Trim messages - Langchain
+Зачем:
+ LLM имеют ограничение на длину контекста (в токенах).
+Как работает:
+ отслеживается количество токенов в истории сообщений, и при приближении к лимиту старые сообщения обрезаются.
+Инструменты:
+ в LangChain есть утилита 
+trim messages
+, где можно указать:
+сколько токенов оставить
+стратегию обрезки (например, оставлять последние 
+max_tokens
+)
+Применение в агенте:
+ обрезка истории выполняется через декоратор 
+@before_model
+ в middleware.
+from langchain_core.messages import trim_messages, RemoveMessage
+
+@before_model
+def trim_history(
+    state: AgentState,
+    runtime: Runtime,
+) -> dict[str, Any] | None:
+    messages = state["messages"]
+
+    trimmed = trim_messages(
+        messages,
+        max_tokens=4000,
+        token_counter="approximate",
+        strategy="last",
+        start_on="human",
+        end_on=("human", "tool"),
+        include_system=True,
+        allow_partial=False,
+    )
+
+    if len(trimmed) == len(messages):
+        return None
+
+    return {
+        "messages": [
+            RemoveMessage(id=REMOVE_ALL_MESSAGES),
+            *trimmed,
+        ]
+    }
+
+## Slide 20
+Advanced Concepts: Memory
+Delete messages
+from langchain.messages import RemoveMessage  
+
+def delete_messages(state):
+    messages = state["messages"]
+    if len(messages) > 2:
+        # remove the earliest two messages
+        return {"messages": [RemoveMessage(id=m.id) for m in messages[:2]]}
+from langgraph.graph.message import REMOVE_ALL_MESSAGES
+
+def delete_messages(state):
+    return {"messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES)]}
+Удаление сообщений из состояния графа:
+Зачем:
+ управлять историей сообщений — удалять отдельные сообщения или очищать всю историю.
+Как:
+ используется 
+RemoveMessage
+.
+Требование:
+ нужен 
+state key
+ с редьюсером 
+add_messages
+ (по умолчанию есть в 
+AgentState
+).
+Пример использования:
+ удаление конкретных сообщений из истории для оптимизации контекста или очистки устаревшей информации.
+
+## Slide 21
+Advanced Concepts: Memory
+Summarize messages
+Проблема обрезки или удаления сообщений:
+При простом 
+trim
+ или удалении сообщений можно потерять важную информацию из истории.
+Решение: использовать более 
+сложный подход — суммирование истории сообщений
+ с помощью чат-модели.
+Это позволяет сохранять суть прошлых взаимодействий, не перегружая контекстное окно LLM
+.
+from langchain.agents import create_agent
+from langchain.agents.middleware import SummarizationMiddleware
+from langgraph.checkpoint.memory import InMemorySaver
+from langchain_core.runnables import RunnableConfig
+
+
+checkpointer = InMemorySaver()
+
+agent = create_agent(
+    model="gpt-4.1",
+    tools=[],
+    middleware=[
+        SummarizationMiddleware(
+            model="gpt-4.1-mini",
+            trigger=("tokens", 4000),
+            keep=("messages", 20)
+        )
+    ],
+    checkpointer=checkpointer,
+)
+
+## Slide 22
+Advanced Concepts: Access memory
+Чтение атрибутов из состояния памяти
+Доступ к краткосрочной памяти (state) в инструменте:
+Используется параметр 
+runtime
+ (тип 
+ToolRuntime
+).
+Параметр 
+скрыт от сигнатуры инструмента
+ — модель его не видит.
+Через 
+runtime
+ инструмент может 
+получать и изменять состояние агента
+, используя краткосрочную память.
+from langchain.agents import create_agent, AgentState
+from langchain.tools import tool, ToolRuntime
+
+
+class CustomState(AgentState):
+    user_id: str
+
+@tool
+def get_user_info(
+    runtime: ToolRuntime
+) -> str:
+    """Look up user info."""
+    user_id = runtime.state["user_id"]
+    return "User is John Smith" if user_id == "user_123" else "Unknown user"
+
+agent = create_agent(
+    model="gpt-5-nano",
+    tools=[get_user_info],
+    state_schema=CustomState,
+)
+
+result = agent.invoke({
+    "messages": "look up user information",
+    "user_id": "user_123"
+})
+print(result["messages"][-1].content)
+# > User is John Smith.
+
+Read short-term memory in a tool
+## Slide 23
+Advanced Concepts: Access memory
+Write short-term memory from tools
+Изменение краткосрочной памяти (state) агента во время выполнения:
+Инструменты могут 
+возвращать обновления состояния напрямую
+.
+Это позволяет:
+сохранять промежуточные результаты
+делать информацию доступной для последующих инструментов или подсказок
+.
+class CustomState(AgentState):  
+    user_name: str
+
+class CustomContext(BaseModel):
+    user_id: str
+
+@tool
+def update_user_info(
+    runtime: ToolRuntime[CustomContext, CustomState],
+) -> Command:
+    """Look up and update user info."""
+    user_id = runtime.context.user_id
+    name = "John Smith" if user_id == "user_123" else "Unknown user"
+    return Command(update={  
+        "user_name": name,
+        # update the message history
+        "messages": [
+            ToolMessage(
+                "Successfully looked up user information",
+                tool_call_id=runtime.tool_call_id
+            )
+        ]
+    })
+
+agent = create_agent(
+    model="gpt-5-nano",
+    tools=[update_user_info],
+    state_schema=CustomState, 
+    context_schema=CustomContext,
+)
+
+agent.invoke(
+    {"messages": [{"role": "user", "content": "greet the user"}]},
+    context=CustomContext(user_id="user_123"),
+)
+
+## Slide 24
+Место памяти в агентной системе
+## Slide 25
+Advanced Concepts: Prompt
+Prompt
+Доступ к краткосрочной памяти (state) в middleware:
+Используется для 
+создания динамических подсказок
+ на основе:
+истории беседы
+пользовательских полей состояния
+Позволяет адаптировать поведение агента под текущий контекст и накопленные данные.
+class CustomContext(TypedDict):
+    user_name: str
+
+
+def get_weather(city: str) -> str:
+    """Get the weather in a city."""
+    return f"The weather in {city} is always sunny!"
+
+
+@dynamic_prompt
+def dynamic_system_prompt(request: ModelRequest) -> str:
+    user_name = request.runtime.context["user_name"]
+    system_prompt = f"You are a helpful assistant. Address the user as {user_name}."
+    return system_prompt
+
+
+agent = create_agent(
+    model="gpt-5-nano",
+    tools=[get_weather],
+    middleware=[dynamic_system_prompt],
+    context_schema=CustomContext,
+)
+
+## Slide 26
+‹#›
+Advanced Concepts: Middleware
+Middleware предоставляет возможности расширения для настройки поведения агента на разных этапах выполнения. С помощью middleware можно:
+Обрабатывать состояние до вызова модели (например, обрезка сообщений, добавление контекста)
+Изменять или валидировать ответ модели (например, guardrails, фильтрация контента).
+Обрабатывать ошибки выполнения инструментов с помощью собственной логики.
+Реализовывать динамический выбор модели в зависимости от состояния или контекста.
+Добавлять собственное логирование, мониторинг и аналитику.
+https://docs.langchain.com/oss/python/langchain/middleware/built-in
+## Slide 27
+‹#›
+Advanced Concepts: Middleware
+Обработка длинной истории - Summarization
+https://docs.langchain.com/oss/python/langchain/middleware/built-in
+from langchain.agents import create_agent
+from langchain.agents.middleware import SummarizationMiddleware
+
+agent = create_agent(
+    model="gpt-4.1",
+    tools=[your_weather_tool, your_calculator_tool],
+    middleware=[
+        SummarizationMiddleware(
+            model="gpt-4.1-mini",
+            trigger=("tokens", 4000),
+            keep=("messages", 20),
+        ),
+    ],
+)
+Суммаризация истории переписки, когда количество токенов приближается к лимиту: последние сообщение остается без изменений, а более ранние — кратко пересказываются.
+Это особенно полезно в следующих случаях:
+при длительных диалогах, которые могут выйти за пределы допустимого объёма контекста;
+в многошаговых обсуждениях с большой историей сообщений;
+в приложениях, где важно сохранить общий смысл всей переписки.
+
+## Slide 28
+‹#›
+Advanced Concepts: Middleware
+Обработка длинной истории 
+https://docs.langchain.com/oss/python/langchain/middleware/built-in
+Context editing
+При достижении лимита токенов автоматически удаляйте старые результаты вызовов инструментов, сохраняя при этом последние. Особенно полезно для:
+долгих бесед с большим количеством вызовов инструментов, превышающих лимиты токенов;
+снижения затрат на токены за счёт удаления устаревших результатов, которые больше не актуальны;
+сохранения только последних N результатов инструментов в контексте.
+agent = create_agent(
+    model="gpt-4.1",
+    tools=[],
+    middleware=[
+        ContextEditingMiddleware(
+            edits=[
+                ClearToolUsesEdit(
+                    trigger=100000,
+                    keep=3,
+                ),
+            ],
+        ),
+    ],
+)
+
+## Slide 29
+‹#›
+Advanced Concepts: Middleware Interrupt
+Прерывание работы агента с учетом ответа/одобрения пользователя - Human-in-the-loop
+Приостанавливайте выполнение действий агентом, чтобы человек мог подтвердить, отредактировать или отклонить вызов инструмента до его выполнения.
+Подход human-in-the-loop особенно полезен в следующих случаях:
+при выполнении важных операций, требующих одобрения человека (например, запись в базу данных или финансовые транзакции);
+в процессах, где по правилам необходим человеческий контроль;
+в длительных диалогах, где дальнейшие действия агента зависят от обратной связи человек
+а.
+from langchain.agents import create_agent
+from langchain.agents.middleware import HumanInTheLoopMiddleware
+from langgraph.checkpoint.memory import InMemorySaver
+
+
+def read_email_tool(email_id: str) -> str:
+    """Mock function to read an email by its ID."""
+    return f"Email content for ID: {email_id}"
+
+def send_email_tool(recipient: str, subject: str, body: str) -> str:
+    """Mock function to send an email."""
+    return f"Email sent to {recipient} with subject '{subject}'"
+
+agent = create_agent(
+    model="gpt-4.1",
+    tools=[your_read_email_tool, your_send_email_tool],
+    checkpointer=InMemorySaver(),
+    middleware=[
+        HumanInTheLoopMiddleware(
+            interrupt_on={
+                "your_send_email_tool": {
+                    "allowed_decisions": ["approve", "edit", "reject"],
+                },
+                "your_read_email_tool": False, # не нужно одобрение
+            } ),],)
+
+## Slide 30
+‹#›
+Advanced Concepts: Middleware
+Прерывание работы агента с учетом ответа/одобрения пользователя - Human-in-the-loop
+Возможные действия:
+Необходимо настроить механизм сохранения состояния (checkpointer), чтобы состояние графа сохранялось между прерываниями выполнения.
+В продакшене используйте постоянное хранилище, например 
+AsyncPostgresSaver
+.
+Для тестирования или прототипирования подойдёт 
+InMemorySaver
+.
+# The interrupt contains the full HITL request with action_requests and review_configs
+print(result['__interrupt__'])
+# > [
+# >    Interrupt(
+# >       value={
+# >          'action_requests': [
+# >             {
+# >                'name': 'execute_sql',
+# >                'arguments': {'query': 'DELETE FROM records WHERE created_at < NOW() - INTERVAL \'30 days\';'},
+# >                'description': 'Tool execution pending approval\n\nTool: execute_sql\nArgs: {...}'
+# >             }
+# >          ],
+# >          'review_configs': [
+# >             {
+# >                'action_name': 'execute_sql',
+# >                'allowed_decisions': ['approve', 'reject']
+# >             }
+# >          ]
+# >       }
+# >    )
+# > ]
+
+# Resume with approval decision
+agent.invoke(
+    Command( resume={"decisions": [{"type": "approve"}]}  # or "reject" ), 
+    config=config # Same thread ID to resume the paused conversation)
+
+## Slide 31
+‹#›
+Advanced Concepts: Middleware
+Ограничения агента
+Model call limit
+Устанавливайте ограничение на число обращений к модели, чтобы избежать бесконечных циклов и расходов. Это особенно полезно для:
+предотвращения ситуаций, когда агент начинает бесконтрольно отправлять слишком много API-запросов;
+контроля затрат;
+тестирования поведения агента в рамках заданного бюджета вызовов.
+agent = create_agent(
+    model="gpt-4.1",
+    checkpointer=InMemorySaver(), 
+    tools=[],
+    middleware=[
+        ModelCallLimitMiddleware(
+            thread_limit=10,
+            run_limit=5,
+            exit_behavior="end", ),],)
+Tool call limit
+Вы можете управлять работой агента, ограничивая количество обращений к инструментам — как глобально (для всех инструментов сразу), так и отдельно для конкретных инструментов.
+предотвращения слишком частых обращений к дорогим внешним API;
+ограничения количества веб-поисков или запросов к базе данных;
+защиты от ситуаций, когда агент зацикливается и начинает бесконтрольно вызывать инструменты.
+agent = create_agent(
+    model="gpt-4.1",
+    tools=[search_tool, database_tool],
+    middleware=[
+        # Global limit
+        ToolCallLimitMiddleware(thread_limit=20, run_limit=10),
+        # Tool-specific limit
+        ToolCallLimitMiddleware(
+            tool_name="search",
+            thread_limit=5,
+            run_limit=3,),],)
+
+
+## Slide 32
+Advanced Concepts: Middleware PII Detection
+Защита агента
+Model fallback
+Настройте автоматическое переключение на альтернативную модель, если основная модель недоступна или возвращает ошибку. Это полезно для:
+создания устойчивых агентов, которые продолжают работать даже при сбоях модели;
+оптимизации затрат — можно переключаться на более дешёвую модель при необходимости;
+agent = create_agent(
+    model="gpt-4.1",
+    tools=[],
+    middleware=[
+        ModelFallbackMiddleware(
+            "gpt-4.1-mini",
+            "claude-3-5-sonnet-20241022",
+        ),
+    ],
+)
+PII detection
+Настройте выявление и обработку персональной информации Это особенно полезно для:
+медицинских и финансовых приложений с требованиями к соблюдению нормативов;
+сервисов поддержки клиентов, где необходимо очищать логи от чувствительных данных;
+любых приложений, работающих с конфиденциальной информацией пользователей.
+agent = create_agent(
+    model="gpt-4.1",
+    tools=[],
+    middleware=[
+        PIIMiddleware("email", strategy="redact", apply_to_input=True),
+	       PIIMiddleware(
+            "phone_number", detector=re.compile(r"\+?\d{1,3}[\s.-]?\d{3,4}[\s.-]?\d{4}"),
+            strategy="mask",
+        ),],)
+
+
+## Slide 33
+Advanced Concepts: Middleware
+Ещё более умная надстройка над агентом:)
+To-do list
+Возможность конструирования плана действий на основе промпта и запроса пользователя. Списки задач (to-do lists) особенно полезны для:
+сложных процессов, состоящих из нескольких этапов и требующих координации разных инструментов;
+длительных операций, где важно видеть прогресс выполнения.
+agent = create_agent(
+    model="gpt-4.1",
+    tools=[read_file, write_file, run_tests],
+    middleware=[TodoListMiddleware()],
+)
+LLM tool selector
+Применяйте отдельную модель, чтобы заранее определить, какие инструменты действительно нужны для текущего запроса, и только затем передавать их основной модели. Применимо для:
+агентов с большим количеством инструментов (10 и более), когда для одного запроса обычно требуется лишь несколько из них;
+снижения расхода токенов за счёт исключения нерелевантных инструментов;
+повышения точности и концентрации модели на задаче.
+agent = create_agent(
+    model="gpt-4.1",
+    tools=[tool1, tool2, tool3, tool4, tool5, ...],
+    middleware=[
+        LLMToolSelectorMiddleware(
+            model="gpt-4.1-mini",
+            max_tools=3,
+            always_include=["search"],
+        ), ],)
+
+
+## Slide 34
+Advanced Concepts: Middleware
+Обеспечение безотказности
+Tool retry
+Настройте автоматическое повторение неудавшихся вызовов инструментов с использованием данного инструмента. Это особенно полезно для:
+обработки временных сбоев при обращении к внешним API;
+повышения надёжности инструментов, зависящих от сети;
+agent = create_agent(
+    model="gpt-4.1",
+    tools=[search_tool, database_tool],
+    middleware=[
+        ToolRetryMiddleware(
+            max_retries=3,
+            backoff_factor=2.0,
+            initial_delay=1.0,
+        ),
+    ],
+)
+agent = create_agent(
+    model="gpt-4.1",
+    tools=[search_tool, database_tool],
+    middleware=[
+        ModelRetryMiddleware(
+            max_retries=3,
+            backoff_factor=2.0,
+            initial_delay=1.0,
+        ),
+    ],
+)
+Model retry
+Настройте автоматическое повторение неудачных запросов к модели с использованием данного инструмента. Это полезно для:
+обработки временных сбоев при обращении к API модели;
+повышения надёжности сетевых запросов к модели;
+создания устойчивых агентов, которые корректно справляются с временными ошибками м
+одели.
+
+
+## Slide 35
+Advanced Concepts: Middleware
+Прототипирование/тестирование
+LLM tool emulator
+Используйте модель для имитации выполнения инструментов: вместо реальных вызовов инструментов агент получает ответы, сгенерированные ИИ. Это особенно полезно для:
+тестирования поведения агента без запуска реальных инструментов;
+разработки агентов, когда внешние инструменты недоступны или дорогостоящие;
+прототипирования рабочих процессов агента перед внедрением настоящих инструментов.
+agent = create_agent(
+    model="gpt-4.1",
+    tools=[get_weather, search_database, send_email],
+    middleware=[
+        LLMToolEmulator(),  # Emulate all tools
+    ],
+)
+
+## Slide 36
+Advanced Concepts: Middleware
+Работа с файлами/командами
+Shell tool
+Открывает для агента доступ к shell, чтобы он мог выполнять системные команды. Это особенно полезно для:
+агентов, которым нужно запускать команды операционной системы;
+автоматизации задач разработки и развертывания;
+операций с файловой системой и выполнения скриптов.
+agent = create_agent(
+    model="gpt-4.1",
+    tools=[search_tool],
+    middleware=[
+        ShellToolMiddleware(
+            workspace_root="/workspace",
+            execution_policy=HostExecutionPolicy(),), ],)
+File search
+Даёт агенту возможность искать файлы и содержимое с помощью шаблонов (Glob) и регулярных выражений (Grep).
+Это особенно полезно для:
+изучения и анализа кода;
+поиска файлов по шаблонам имени;
+поиска содержимого кода с помощью регулярных выражений;
+работы с большими кодовыми базами, где важно быстро находить нужные файлы.
+agent = create_agent(
+    model="gpt-4.1",
+    tools=[],
+    middleware=[
+        FilesystemFileSearchMiddleware(
+            root_path="/workspace",
+            use_ripgrep=True,
+        ),
+    ],
+)
+
+
+## Slide 37
+Advanced Concepts: Middleware
+Работа с файлами/командами
+Filesystem middleware
+FilesystemMiddleware добавляет агентам инструменты работы с файловой системой, позволяя им просматривать, читать, изменять и искать файлы.
+ls
+ — вывод списка файлов в файловой системе;
+read_file
+ — чтение целого файла или определённого количества строк;
+write_file
+ — создание нового файла в файловой системе;
+edit_file
+ — редактирование существующего файла.
+from deepagents.middleware.filesystem import FilesystemMiddleware
+
+# FilesystemMiddleware is included by default in create_deep_agent
+# You can customize it if building a custom agent
+agent = create_agent(
+    model="claude-sonnet-4-5-20250929",
+    middleware=[
+        FilesystemMiddleware(
+            backend=None,  # Optional: custom backend (defaults to StateBackend)
+            system_prompt="Write to the filesystem when...",  # Optional custom addition to the system prompt
+            custom_tool_descriptions={
+                "ls": "Use the ls tool when...",
+                "read_file": "Use the read_file tool to..."
+            }  # Optional: Custom descriptions for filesystem tools
+        ),
+    ],
+)
+
+## Slide 38
+Advanced Concepts: Middleware
+Работа с файлами/командами
+## Slide 39
+Advanced Concepts: Middleware
+Работа с файлами/командами
+Инструмент 
+ls
+Выводит список файлов и директорий по указанному пути.
+Возвращает пути к файлам и подпапкам (для директорий добавляется символ 
+/
+ в конце).
+Параметры:
+path
+ (
+str
+, обязательный) — абсолютный путь к директории, содержимое которой нужно вывести. Путь должен быть абсолютным, а не относительным.
+Пример результата:
+['/test.txt', '/pokemon/', '/docs/']
+## Slide 40
+Advanced Concepts: Middleware
+Работа с файлами/командами
+Инструмент 
+read_file
+Читает содержимое файла с поддержкой пагинации для больших файлов.
+Параметры:
+file_path
+ (
+str
+, обязательный) — абсолютный путь к файлу.
+offset
+ (
+int
+, необязательный) — номер строки, с которой начинать чтение (индексация с 0).
+По умолчанию: 
+0
+.
+limit
+ (
+int
+, необязательный) — максимальное количество строк для чтения.
+По умолчанию: 
+100
+.
+Поведение:
+Возвращает содержимое файла с нумерацией строк в формате 
+cat -n
+ (нумерация начинается с 1).
+Строки длиннее 5000 символов автоматически разбиваются на части с маркерами продолжения (например, 
+5.1
+, 
+5.2
+).
+Если размер результата превышает 
+tool_token_limit_before_evict
+, вывод обрезается с предупреждением.
+Если файл пустой, возвращается системное сообщение:
+"System reminder: File exists but has empty contents"
+.
+## Slide 41
+Advanced Concepts: Middleware
+Работа с файлами/командами
+Инструмент 
+write_file
+Создаёт новый файл с указанным содержимым.
+Параметры:
+file_path
+ (
+str
+, обязательный) — абсолютный путь, по которому нужно создать файл.
+content
+ (
+str
+, обязательный) — текстовое содержимое файла.
+Возвращаемое значение:
+Если бекенд возвращает 
+files_update
+, инструмент возвращает 
+Command
+ с обновлением состояния.
+В противном случае возвращается строка с сообщением об успехе:
+"Updated file {path}"
+.
+Рекомендации по использованию:
+Предпочтительно редактировать существующие файлы
+ с помощью инструмента 
+edit_file
+, вместо создания новых, если это возможно.
+## Slide 42
+Advanced Concepts: Middleware
+Работа с файлами/командами
+Инструмент 
+edit_file
+Выполняет точную замену строк в файлах.
+Параметры:
+file_path
+ (
+str
+, обязательный) — абсолютный путь к редактируемому файлу.
+old_string
+ (
+str
+, обязательный) — точный текст для поиска и замены. Должен быть уникальным, если 
+replace_all=False
+.
+new_string
+ (
+str
+, обязательный) — текст, которым заменяется 
+old_string
+.
+replace_all
+ (
+bool
+, необязательный) — если 
+True
+, заменяются все вхождения. Если 
+False
+ (по умолчанию), 
+old_string
+ должно встречаться только один раз.
+Поведение:
+Файл должен быть прочитан до редактирования (контролируется описанием инструмента).
+Сохраняет исходное форматирование и отступы.
+Не включайте номера строк
+ в 
+old_string
+ или 
+new_string
+.
+Возвращает ошибку, если 
+old_string
+ не найден или встречается несколько раз при 
+replace_all=False
+.
+## Slide 43
+Advanced Concepts: Middleware
+Работа с файлами/командами
+Инструмент 
+glob
+Ищет файлы, соответствующие заданному шаблону glob.
+Параметры:
+pattern
+ (
+str
+, обязательный) — шаблон glob для поиска файлов (например, 
+**/*.py
+, 
+*.txt
+, 
+/subdir/**/*.md
+).
+path
+ (
+str
+, необязательный) — базовая директория для поиска. По умолчанию: корень 
+/
+.
+Поддерживаемые шаблоны:
+*
+ — соответствует любым символам внутри сегмента пути.
+**
+ — соответствует любым каталогам рекурсивно.
+?
+ — соответствует одному символу.
+{a,b}
+ — фигурные скобки для альтернатив (выбор одного из вариантов).
+Примеры использования:
+glob(pattern="**/*.py")           # Все Python-файлы рекурсивно
+glob(pattern="*.txt")              # Текстовые файлы только в корне
+glob(pattern="/subdir/**/*.md")    # Markdown-файлы в /subdir и всех подкаталогах
+glob(pattern="*.{py,pyi}")         # Python-исходники и stub-файлы
+
+## Slide 44
+Advanced Concepts: Middleware
+Работа с файлами/командами
+Режим
+Описание
+Пример вывода
+files_with_matches
+Только пути к файлам
+['/test.py', '/main.py']
+content
+Строки с совпадениями с номерами строк
+1: import os\n2: import sys
+count
+Количество совпадений на файл
+/test.py: 2\n/main.py: 1
+Инструмент 
+grep
+Ищет точные текстовые шаблоны в файлах.
+Параметры:
+pattern
+ (
+str
+, обязательный) — текст для поиска (буквальный, не регулярное выражение).
+path
+ (
+str | None
+, необязательный) — директория для поиска. По умолчанию: текущая рабочая директория.
+glob
+ (
+str | None
+, необязательный) — шаблон glob для фильтрации файлов (например, 
+*.py
+).
+output_mode
+ (
+"files_with_matches" | "content" | "count"
+, необязательный) — формат вывода. По умолчанию: 
+"files_with_matches"
+.
+
+Режимы вывода:
+
+## Slide 45
+Advanced Concepts: Middleware
+Разработка Subagents
+Subagent
+Передача задач субагентам помогает держать контекст главного агента чистым, одновременно позволяя глубоко прорабатывать отдельные задачи.
+Промежуточный слой 
+Subagents Middleware
+ позволяет создавать субагентов через специальный инструмент для задач (task tool), чтобы делегировать им выполнение подзадач.
+from deepagents.middleware.subagents import SubAgentMiddleware
+@tool
+def get_weather(city: str) -> str:
+    """Get the weather in a city."""
+    return f"The weather in {city} is sunny."
+
+agent = create_agent(
+    model="claude-sonnet-4-5-20250929",
+    middleware=[
+        SubAgentMiddleware(
+            default_model="claude-sonnet-4-5-20250929",
+            default_tools=[],
+            subagents=[
+                {
+                    "name": "weather",
+                    "description": "This subagent can get weather in cities.",
+                    "system_prompt": "Use the get_weather tool to get the weather in a city.",
+                    "tools": [get_weather],
+                    "model": "gpt-4.1",
+                    "middleware": [],
+                }
+            ],
+        )
+    ],
+)
+
+## Slide 46
+Схема агента
+Схема простого агента от Langchain
+‹#›
+Схема продвинутого агента от Langchain
+## Slide 47
+‹#›
+Advanced Concepts: Pre- Post- Model Hook
+Node-style hooks
+Позволяет выполнять дополнительную логику в конкретные моменты работы агента. Обычно используется для логирования, валидации и обновления состояния.
+Доступные хуки:
+before_agent
+ — выполняется перед запуском агента (один раз за вызов).
+before_model
+ — выполняется перед каждым обращением к модели.
+after_model
+ — выполняется после каждого ответа модели.
+after_agent
+ — выполняется после завершения работы агента (один раз за вызов).
+Wrap-style hooks
+Позволяет перехватывать выполнение и самостоятельно решать, когда и сколько раз вызывать инструмент/модель. Используется для реализации повторных попыток (retry), кэширования и трансформации данных.
+Вы можете определить:
+вызвать обработчик 
+0 раз
+ (short-circuit, полностью пропустить вызов);
+вызвать его 
+1 раз
+ (обычный сценарий);
+вызвать 
+несколько раз
+ (например, для реализации retry-логики).
+Доступно:
+wrap_model_call
+ — оборачивает каждый вызов модели.
+wrap_tool_call
+ — оборачивает каждый вызов инструмента.
+## Slide 48
+‹#›
+Advanced Concepts: Pre- Post- Model Hook
+Node-style hooks
+from langchain.agents.middleware import before_model, after_model, AgentState
+from langchain.messages import AIMessage
+from langgraph.runtime import Runtime
+from typing import Any
+
+
+@before_model(can_jump_to=["end"])
+def check_message_limit(state: AgentState, runtime: Runtime) -> dict[str, Any] | None:
+    if len(state["messages"]) >= 50:
+        return {
+            "messages": [AIMessage("Conversation limit reached.")],
+            "jump_to": "end"
+        }
+    return None
+
+@after_model
+def log_response(state: AgentState, runtime: Runtime) -> dict[str, Any] | None:
+    print(f"Model returned: {state['messages'][-1].content}")
+    return None
+from langchain.agents.middleware import wrap_model_call, ModelRequest, ModelResponse
+from typing import Callable
+
+
+@wrap_model_call
+def retry_model(
+    request: ModelRequest,
+    handler: Callable[[ModelRequest], ModelResponse],
+) -> ModelResponse:
+    for attempt in range(3):
+        try:
+            return handler(request)
+        except Exception as e:
+            if attempt == 2:
+                raise
+            print(f"Retry {attempt + 1}/3 after error: {e}")
+Wrap-style hooks
+
+
+## Slide 49
+‹#›
+Advanced Concepts: Pre- Post- Model Hook
+@before_model
+def log_before_model(state: AgentState, runtime: Runtime) -> dict[str, Any] | None:
+    print(f"About to call model with {len(state['messages'])} messages")
+    return None
+
+@wrap_model_call
+def retry_model(
+    request: ModelRequest,
+    handler: Callable[[ModelRequest], ModelResponse],
+) -> ModelResponse:
+    for attempt in range(3):
+        try:
+            return handler(request)
+        except Exception as e:
+            if attempt == 2:
+                raise
+            print(f"Retry {attempt + 1}/3 after error: {e}")
+
+agent = create_agent(
+    model="gpt-4.1",
+    middleware=[log_before_model, retry_model],
+    tools=[...],
+)
+Decorator-based middleware
+Используется в случае если:
+Нужен только один вызов
+Вы хотите вмешаться в один конкретный этап (например, только перед вызовом модели).
+Нет необходимости выстраивать цепочку из нескольких middleware.
+Логика точечная и не зависит от других этапов выполнения.
+Нет сложной конфигурации
+Не требуется передавать множество параметров или настраивать поведение через классы.
+Логика простая: логирование, измерение времени, добавление поля в контекст.
+Быстрое прототипирование
+Нужно быстро проверить идею (например, добавить временный лог или модификацию промпта).
+Локальная логика
+Поведение должно применяться только к одной функции или одному агенту.
+
+## Slide 50
+‹#›
+Advanced Concepts: Pre- Post- Model Hook
+Decorator-based middleware
+Доступные декораторы:
+Node-style (по событиям жизненного цикла):
+@before_agent
+ — выполняется перед запуском агента (один раз за вызов)
+@before_model
+ — выполняется перед каждым вызовом модели
+@after_model
+ — выполняется после каждого ответа модели
+@after_agent
+ — выполняется после завершения работы агента (один раз за вызов)
+Wrap-style (обёртки):
+@wrap_model_call
+ — оборачивает каждый вызов модели пользовательской логикой
+@wrap_tool_call
+ — оборачивает каждый вызов инструмента пользовательской логикой
+Convenience (вспомогательный):
+@dynamic_prompt
+ — генерирует динамический системный промпт
+## Slide 51
+‹#›
+Advanced Concepts: Pre- Post- Model Hook
+Class-based middleware
+Когда использовать классы:
+Когда нужно определить и синхронную, и асинхронную реализацию одного и того же хука
+Когда в одном middleware требуется несколько хуков
+Когда необходима сложная конфигурация 
+Когда нужно повторное использование в разных проектах с конфигурацией при инициализации
+from langchain.agents.middleware import (
+    AgentMiddleware,
+    AgentState,
+    ModelRequest,
+    ModelResponse,
+)
+from langgraph.runtime import Runtime
+from typing import Any, Callable
+
+class LoggingMiddleware(AgentMiddleware):
+    def before_model(self, state: AgentState, runtime: Runtime) -> dict[str, Any] | None:
+        print(f"About to call model with {len(state['messages'])} messages")
+        return None
+
+    def after_model(self, state: AgentState, runtime: Runtime) -> dict[str, Any] | None:
+        print(f"Model returned: {state['messages'][-1].content}")
+        return None
+
+agent = create_agent(
+    model="gpt-4.1",
+    middleware=[LoggingMiddleware()],
+    tools=[...],
+)
+
+## Slide 52
+‹#›
+Advanced Concepts: Memory (State)
+Custom state schema
+Middleware может расширять состояние агента пользовательскими свойствами. Это позволяет middleware:
+Отслеживать состояние в процессе выполнения:
+ хранить счётчики, флаги или другие значения, которые сохраняются на протяжении всего жизненного цикла выполнения агента
+Передавать данные между хуками:
+ передавать информацию из 
+before_model
+ в 
+after_model
+ или между разными экземплярами middleware
+Реализовывать сквозную функциональность:
+ добавлять такие возможности, как ограничение частоты запросов (rate limiting), отслеживание использования, пользовательский контекст или аудит-логирование, не изменяя основную логику агента
+Принимать условные решения:
+ использовать накопленное состояние, чтобы определить — продолжать выполнение, перейти к другим узлам или динамически изменить поведение
+class CustomState(AgentState):
+    model_call_count: NotRequired[int]
+    user_id: NotRequired[str]
+
+
+@before_model(state_schema=CustomState, can_jump_to=["end"])
+def check_call_limit(state: CustomState, runtime: Runtime) -> dict[str, Any] | None:
+    count = state.get("model_call_count", 0)
+    if count > 10:
+        return {"jump_to": "end"}
+    return None
+
+
+@after_model(state_schema=CustomState)
+def increment_counter(state: CustomState, runtime: Runtime) -> dict[str, Any] | None:
+    return {"model_call_count": state.get("model_call_count", 0) + 1}
+
+
+agent = create_agent(
+    model="gpt-4.1",
+    middleware=[check_call_limit, increment_counter],
+    tools=[],
+)
+
+# Invoke with custom state
+result = agent.invoke({
+    "messages": [HumanMessage("Hello")],
+    "model_call_count": 0,
+    "user_id": "user-123",
+})
+
+## Slide 53
+‹#›
+Advanced Concepts: Memory (State)
+Как происходит порядок вызова объектов в Middleware
+agent = create_agent(
+    model="gpt-4.1",
+    middleware=[middleware1, middleware2, middleware3],
+    tools=[...],
+)
+Основные правила:
+Хуки 
+before_*
+:
+ выполняются в порядке от первого к последнему
+Хуки 
+after_*
+:
+ выполняются в обратном порядке — от последнего к первому
+Хуки 
+wrap_*
+:
+ вложенные — первый middleware оборачивает все остальные
+Чтобы досрочно завершить выполнение middleware, верните словарь с ключом 
+jump_to
+:
+Доступные цели перехода (jump targets):
+'end'
+ — перейти к концу выполнения агента (или к первому хуку 
+after_agent
+)
+'tools'
+ — перейти к узлу инструментов
+'model'
+ — перейти к узлу модели (или к первому хуку 
+before_model
+)
+Agent jumps
+@after_model
+@hook_config(can_jump_to=["end"])
+def check_for_blocked(state: AgentState, runtime: Runtime) -> dict[str, Any] | None:
+    last_message = state["messages"][-1]
+    if "BLOCKED" in last_message.content:
+        return {
+            "messages": [AIMessage("I cannot respond to that request.")],
+            "jump_to": "end"
+        }
+    return None
+
+
+## Slide 54
+‹#›
+Advanced Concepts: Pre- Post- Model Hook
+Для чего можем использовать:
+complex_model = init_chat_model("gpt-4.1")
+simple_model = init_chat_model("gpt-4.1-mini")
+
+@wrap_model_call
+def dynamic_model(
+    request: ModelRequest,
+    handler: Callable[[ModelRequest], ModelResponse],
+) -> ModelResponse:
+    # Use different model based on conversation length
+    if len(request.messages) > 10:
+        model = complex_model
+    else:
+        model = simple_model
+    return handler(request.override(model=model))
+Dynamic model selection
+Tool call monitoring
+@wrap_tool_call
+def monitor_tool(
+    request: ToolCallRequest,
+    handler: Callable[[ToolCallRequest], ToolMessage | Command],
+) -> ToolMessage | Command:
+    print(f"Executing tool: {request.tool_call['name']}")
+    print(f"Arguments: {request.tool_call['args']}")
+    try:
+        result = handler(request)
+        print(f"Tool completed successfully")
+        return result
+    except Exception as e:
+        print(f"Tool failed: {e}")
+        raise
+
+
+## Slide 55
+‹#›
+Advanced Concepts: LangGraph - цепочки
+Это 
+низкоуровневая платформа для построения, управления и развертывания долгоживущих, состоянием управляемых агентов.
+Особенности:
+Полностью сосредоточен на оркестрации агентов
+Обеспечивает надёжное выполнение, стриминг данных, интеграцию с человеком в цикле (human-in-the-loop) и другие возможности
+Взаимодействие с компонентами:
+Обычно интегрируется с моделями и инструментами через компоненты LangChain
+Использование LangChain не обязательно
+Для новичков или высокоуровневых задач можно использовать агенты LangChain с готовыми архитектурами LLM и вызова инструментов
+def approval_node(state: State) -> Command[Literal["proceed", "cancel"]]:
+    # Pause execution; payload shows up under result["__interrupt__"]
+    is_approved = interrupt({
+        "question": "Do you want to proceed with this action?",
+        "details": state["action_details"]})
+    if is_approved:
+        return Command(goto="proceed")  # Runs after the resume payload is provided
+    else:
+        return Command(goto="cancel")
+def mock_llm(state: MessagesState):
+    return {"messages": [{"role": "ai", "content": "hello world"}]}
+
+graph = StateGraph(MessagesState)
+graph.add_node(mock_llm)
+graph.add_edge(START, "mock_llm")
+graph.add_edge("mock_llm", END)
+graph = graph.compile()
+graph.invoke({"messages": [{"role": "user", "content": "hi!"}]})
+interrupt
+
+
+## Slide 56
+Advanced Concepts: Deep Agents
+‹#›
+Deep Agents — надстройка над LangChain create_agent и LangGraph для сложных, многошаговых задач.
+LangGraph  ·  runtime
+LangChain  ·  create_agent
+Deep Agents  ·  harness
+→
+→
+Основные компоненты
+
+Подагенты (task)
+Делегирование задач в отдельный контекст.
+
+Файловая система
+read_file, write_file, glob/grep; backend на выбор.
+
+Контекст и знания
+Суммаризация, offloading, memory, skills.
+
+Контроль выполнения
+HITL, permissions, опциональный план задач.
+Минимальный пример (Python)
+
+from deepagents import create_deep_agent
+from langchain.agents.middleware import TodoListMiddleware
+
+agent = create_deep_agent(
+    model="openai:gpt-4.1",
+    tools=[search_tool],
+    middleware=[TodoListMiddleware()],
+)
+agent.invoke({"messages": [
+    {"role": "user", "content": "Подготовь отчёт"}
+]})
+Важно: TodoListMiddleware — опция (с версии 0.7), а выполнение команд требует настроенного backend/sandbox.
+## Slide 57
+Deep Agents: преимущества и недостатки
+‹#›
+Преимущества
+Недостатки
+
+Быстрая разработка
+Файлы, подагенты и middleware уже объединены.
+Меньше переполнений контекста
+Изоляция подзадач, суммаризация, offloading.
+Гибкая настройка
+Модели, tools, skills и backends заменяемы.
+Надёжная основа
+LangGraph: checkpoints, streaming, HITL.
+Расходы и задержки
+Дополнительные шаги и вызовы LLM/подагентов.
+Сложнее тестировать
+Больше недетерминизма, веток и точек сбоя.
+Избыточность
+Для простого tool calling хватает create_agent.
+Безопасность — отдельно
+Нужны sandbox, права доступа и контроль tools.
+
+Выбор: create_agent — простые сценарии; Deep Agents — многошаговые задачи с файлами и подагентами.
+## Slide 58
+Advanced Concepts: Sandbox — песочница
+‹#›
+Источник: docs.langchain.com
+Sandbox — изолированное окружение для запуска кода, команд и работы с файлами агента.
+
+LLM / Agent
+Планирует действия
+и вызывает инструменты
+
+Sandbox backend
+Адаптер к провайдеру
+через Python SDK
+
+Изолированная среда
+Python · shell · файлы
+тесты · артефакты
+→
+→
+Зачем нужна изоляция
+Ошибки или небезопасные команды не должны затрагивать хост, секреты и чужие данные.
+Что доступно внутри
+Команды, библиотеки, временные файлы; сеть и ресурсы — по политике провайдера.
+
+Важно: FilesystemBackend и StateBackend хранят файлы, но не равны изолированному sandbox.
+Backend — 
+адаптер, который связывает агента с файлами и командами локальной системы или Sandbox.
+## Slide 59
+Sandbox: провайдеры и выбор
+‹#›
+Провайдер создаёт среду выполнения; интеграция LangChain даёт единый интерфейс backend.
+
+Провайдер
+
+Основное применение
+
+Интеграция Python
+
+LangSmith
+Управляемая среда в экосистеме LangChain
+deepagents.backends.LangSmithSandbox
+E2B
+Запуск Python, эксперименты и тесты
+langchain_e2b.E2BSandbox
+
+Daytona
+Рабочие пространства для coding-агентов
+langchain_daytona.DaytonaSandbox
+Modal
+Настраиваемое облачное выполнение
+langchain_modal.ModalSandbox
+
+Runloop
+Удалённые devbox для задач разработки
+langchain_runloop.RunloopSandbox
+Vercel
+Облачный sandbox для приложений
+langchain_vercel_sandbox.VercelSandbox
+## Slide 60
+Deep Agents + E2B Sandbox: пример
+‹#›
+В Deep Agents sandbox передаётся в параметр backend=...; tools добавляются автоматически.
+
+# uv add deepagents langchain-e2b langchain-openai
+from e2b import Sandbox
+from langchain_e2b import E2BSandbox
+from deepagents import create_deep_agent
+
+remote = Sandbox.create()
+backend = E2BSandbox(sandbox=remote)
+agent = create_deep_agent(
+    model="openai:gpt-4.1",
+    backend=backend,
+    system_prompt="Пиши код и проверяй тестами",
+)
+try:
+    answer = agent.invoke({"messages": [
+        {"role": "user", "content": "Создай calc.py"}
+    ]})
+finally:
+    remote.kill()
+Что происходит?
+1. Создаём
+Отдельную среду через E2B SDK.
+2. Оборачиваем
+E2BSandbox реализует backend Deep Agents.
+3. Запускаем
+Агент использует read_file / write_file / execute.
+4. Освобождаем
+finally гарантирует закрытие среды.
+## Slide 61
+Deep Agents: меняем sandbox-провайдера
+‹#›
+Сам create_deep_agent не меняется — меняется только создание backend и очистка ресурсов.
+Daytona
+
+# uv add langchain-daytona
+from daytona import Daytona
+from langchain_daytona import DaytonaSandbox
+
+workspace = Daytona().create()
+backend = DaytonaSandbox(sandbox=workspace)
+# ... agent.invoke(...)
+workspace.stop()
+Modal
+
+# uv add langchain-modal
+import modal
+from langchain_modal import ModalSandbox
+
+app = modal.App.lookup("your-app")
+remote = modal.Sandbox.create(app=app)
+backend = ModalSandbox(sandbox=remote)
+# ... agent.invoke(...)
+remote.terminate()
+
+Общая часть
+agent = create_deep_agent(model="openai:gpt-4.1", backend=backend)
+Создавайте backend перед invoke; закрывайте его после работы (лучше в try/finally).
+## Slide 62
+LangChain create_agent: Sandbox через @tool
+‹#›
+У обычного create_agent нет параметра sandbox/backend: оборачиваем SDK в LangChain tool.
+
+# uv add langchain langchain-openai langchain-e2b
+from e2b import Sandbox
+from langchain_e2b import E2BSandbox
+from langchain.tools import tool
+from langchain.agents import create_agent
+
+remote = Sandbox.create()
+backend = E2BSandbox(sandbox=remote)
+
+@tool
+def run_python(code: str) -> str:
+    """Run Python in an isolated sandbox."""
+    backend.upload_files([("/tmp/job.py", code.encode())])
+    return backend.execute("python /tmp/job.py").output
+
+agent = create_agent("openai:gpt-4.1", tools=[run_python])
+try:
+    result = agent.invoke({"messages": [{
+        "role": "user", "content": "Вычисли 7**3"
+    }]})
+finally:
+    remote.kill()
+Разница с Deep Agents
+create_agent
+Сам выбираешь и описываешь @tool.
+create_deep_agent
+backend=... подключает набор файловых tools + execute.
+Преимущество
+Точный контроль интерфейса и разрешённых операций.
+## Slide 63
+Sandbox: файлы, артефакты и жизненный цикл
+‹#›
+Два потока: агент работает с файлами внутри sandbox; приложение загружает и забирает артефакты.
+Передача файлов приложением
+
+# backend = E2BSandbox(sandbox=remote)
+backend.upload_files([
+    ("/input/data.csv", b"x,y\n1,2\n")
+])
+
+# Внутри sandbox агент работает с /input/...
+files = backend.download_files(["/output/result.txt"])
+for f in files:
+    if f.content is not None:
+        print(f.path, f.content.decode())
+Управление окружением
+Один sandbox на thread
+Сохраняет файлы между сообщениями одной беседы.
+Отдельно на пользователя/задачу
+Изоляция данных; меньше риск смешивания состояний.
+TTL и остановка
+Неиспользуемые среды расходуют ресурсы и деньги.
+Артефакты забираем до shutdown
+После уничтожения временной среды файлы могут исчезнуть.
+
+Важно: файлы в sandbox — не LangGraph memory/checkpointer; долговременное хранение настройте отдельно.
+## Slide 64
+Sandbox: ограничения, безопасность и выбор
+‹#›
+Что действительно защищает
+Что необходимо настроить
+Изоляция хоста
+Команды исполняются в удалённой среде, а не в процессе API-сервиса.
+Отделение файлов
+Sandbox не должен видеть локальные секреты и файлы сервера.
+Контролируемый доступ
+Можно ограничивать ресурсы и сеть средствами платформы.
+Сеть и секреты
+Ограничьте egress, не передавайте ключи и токены без необходимости.
+Лимиты и бюджет
+CPU/RAM, время команды, TTL, частота вызовов, логирование.
+Утверждение действий
+HITL для чувствительных операций: sandbox не блокирует prompt injection.
+
+Итого: Deep Agents → sandbox как backend; обычный LangChain → sandbox SDK как @tool.
+FilesystemBackend/LocalShellBackend ≠ безопасная изоляция выполнения.
+## Slide 65
+‹#›
+FilesystemBackend и LocalShellBackend
+Это локальные backend-адаптеры Deep Agents. Ни один из них сам по себе не создаёт sandbox.
+
+FilesystemBackend
+• Читает и меняет реальные файлы внутри root_dir.
+• Инструменты: ls, read_file, write_file, edit_file, glob, grep.
+• Не даёт execute: команды shell не запускаются.
+
+LocalShellBackend
+• Наследует все файловые операции FilesystemBackend.
+• Добавляет execute: запуск shell-команд на хосте.
+• НЕ изолирует процессы: доступны права ОС пользователя.
+Подключение к Deep Agents (выбери один backend)
+
+from deepagents import create_deep_agent
+from deepagents.backends import FilesystemBackend, LocalShellBackend
+backend = FilesystemBackend(root_dir="/workspace", virtual_mode=True)  # или LocalShellBackend(...)
+agent = create_deep_agent(model="openai:gpt-4.1", backend=backend)
+
+Важно: virtual_mode=True ограничивает пути файловых tools, но НЕ shell. Для недоверенного кода нужен изолированный sandbox.
+## Slide 66
+‹#›
+Зачем backend, если уже есть Sandbox?
+Sandbox — изолированная среда. Backend — интерфейс доступа к файлам и командам. Sandbox тоже может быть backend.
+
+Критерий
+
+FilesystemBackend
+
+LocalShellBackend
+
+Sandbox backend
+
+Где файлы?
+
+На диске твоего
+приложения / хоста
+
+На диске твоего
+приложения / хоста
+
+В отдельной
+изолированной среде
+
+execute
+
+Нет: только файловые
+операции
+
+Да: команды прямо
+на хосте
+
+Да: команды внутри
+Sandbox
+
+Изоляция
+
+Нет (можно ограничить
+пути файловых tools)
+
+Нет: shell имеет права
+пользователя ОС
+
+Да: изоляция по
+политикам Sandbox
+
+Где уместен?
+
+Работа с локальными
+файлами проекта
+
+Локальная разработка,
+тесты и сборка
+
+Недоверенный код,
+API и мультипользователи
+Почему не использовать Sandbox всегда?
+
+FilesystemBackend: работа сразу с реальным репозиторием, без переноса файлов и удалённой среды.
+
+LocalShellBackend: запуск pytest/build в уже настроенном dev-окружении, без отдельной VM.
+
+Важно: virtual_mode=True ≠ sandbox. Локальный shell безопасно использовать лишь для доверенных задач.
