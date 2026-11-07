@@ -1,0 +1,105 @@
+{
+  "schema_version": "1.0",
+  "status": "proposed_not_runtime_config",
+  "profiles": {
+    "default": "dynamic",
+    "allowed": ["static", "dynamic", "simulation"],
+    "simulation": {"mark_synthetic": true, "external_writes": false}
+  },
+  "run": {
+    "max_model_attempts": 24,
+    "max_tool_attempts": 40,
+    "max_total_tokens": 48000,
+    "active_deadline_seconds": 300,
+    "approval_ttl_seconds": 86400,
+    "max_retries": 2,
+    "max_schema_repairs": 1,
+    "max_review_revisions": 1,
+    "graph_recursion_limit": 60,
+    "max_active_runs_per_thread": 1,
+    "count_children_and_retries": true,
+    "reserve_usage_atomically": true
+  },
+  "delegation": {"max_tasks": 3, "max_parallel": 2, "max_depth": 1},
+  "rolling_quotas": {
+    "window_seconds": 86400,
+    "max_model_attempts_per_thread": 200,
+    "max_tool_attempts_per_thread": 400,
+    "max_tokens_per_user": 500000
+  },
+  "context": {
+    "target_input_tokens": 24000,
+    "output_reserve_tokens": 4000,
+    "safety_margin_tokens": 2000,
+    "clamp_to_model_capabilities": true,
+    "summary_trigger_ratio": 0.7,
+    "keep_recent_complete_turns": 4,
+    "keep_recent_tool_bodies": 3,
+    "memory_max_records": 5,
+    "memory_max_tokens": 1000
+  },
+  "rag": {
+    "chunk_tokens": 600,
+    "overlap_tokens": 100,
+    "dense_top_k": 30,
+    "sparse_top_k": 30,
+    "fusion": "rrf",
+    "max_rerank_candidates": 40,
+    "final_top_k": 6,
+    "max_evidence_tokens": 6000,
+    "max_acl_refills": 1,
+    "canonical_acl_check_before_external_rerank": true,
+    "embedding_revision_required": true
+  },
+  "uploads": {
+    "max_file_bytes": 26214400,
+    "max_expanded_bytes": 209715200,
+    "max_pages": 1000,
+    "allowed_formats": ["pdf", "docx", "pptx", "txt", "md", "csv"]
+  },
+  "web": {
+    "max_search_calls": 4,
+    "max_fetch_calls": 6,
+    "max_search_results": 5,
+    "timeout_seconds": 15,
+    "max_response_bytes": 2097152,
+    "max_redirects": 3,
+    "revalidate_dns_and_redirects": true,
+    "allow_private_networks": false,
+    "allow_browser_javascript": false,
+    "dlp_before_search": true
+  },
+  "sandbox": {
+    "provider_candidate": "e2b",
+    "activation_requires_capability_tests": true,
+    "allow_host_execution_fallback": false,
+    "network": "deny",
+    "cpu_count": 2,
+    "memory_mib": 2048,
+    "disk_mib": 1024,
+    "max_commands_per_run": 5,
+    "command_timeout_seconds": 60,
+    "idle_ttl_seconds": 600,
+    "absolute_ttl_seconds": 1800,
+    "max_stdout_stderr_bytes": 102400,
+    "max_artifact_bytes": 20971520,
+    "max_output_bytes_per_run": 52428800,
+    "export_before_termination": true,
+    "janitor_required": true
+  },
+  "retention": {
+    "inactive_thread_days": 30,
+    "memory_review_days": 180,
+    "artifact_days": 30,
+    "online_deletion_target_hours": 24,
+    "backup_days": 30
+  },
+  "security": {
+    "identity_from_authenticated_context_only": true,
+    "authorize_every_tool_execution": true,
+    "approve_external_writes": true,
+    "confirm_memory_changes": true,
+    "raw_prompts_in_logs": false,
+    "secrets_in_sandbox": false
+  }
+}

@@ -1,0 +1,116 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:agent-netology:contracts:1",
+  "title": "Agent Netology design contracts",
+  "description": "Design contracts. Runtime must additionally enforce authorization, reference integrity, budgets and provenance.",
+  "oneOf": [
+    {"$ref": "#/$defs/AgentAnswer"},
+    {"$ref": "#/$defs/ToolResult"},
+    {"$ref": "#/$defs/ApprovalDecision"}
+  ],
+  "$defs": {
+    "Id": {"type": "string", "minLength": 1, "maxLength": 160},
+    "Source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_id", "kind", "title", "locator", "excerpt"],
+      "properties": {
+        "source_id": {"$ref": "#/$defs/Id"},
+        "kind": {"enum": ["document", "web", "calculation", "memory"]},
+        "title": {"type": "string", "minLength": 1},
+        "locator": {"type": "string", "minLength": 1},
+        "excerpt": {"type": "string", "maxLength": 20000},
+        "url": {"type": "string", "format": "uri"},
+        "document_id": {"$ref": "#/$defs/Id"},
+        "document_version": {"type": "integer", "minimum": 1},
+        "artifact_id": {"$ref": "#/$defs/Id"},
+        "fetched_at": {"type": "string", "format": "date-time"},
+        "published_at": {"type": ["string", "null"], "format": "date-time"},
+        "content_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+      },
+      "allOf": [
+        {"if": {"properties": {"kind": {"const": "web"}}}, "then": {"required": ["url", "fetched_at", "content_hash"]}},
+        {"if": {"properties": {"kind": {"const": "document"}}}, "then": {"required": ["document_id", "document_version", "content_hash"]}},
+        {"if": {"properties": {"kind": {"const": "calculation"}}}, "then": {"required": ["artifact_id", "content_hash"]}}
+      ]
+    },
+    "Artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact_id", "filename", "mime_type", "size_bytes", "sha256"],
+      "properties": {
+        "artifact_id": {"$ref": "#/$defs/Id"},
+        "filename": {"type": "string", "minLength": 1, "maxLength": 255},
+        "mime_type": {"type": "string", "minLength": 1},
+        "size_bytes": {"type": "integer", "minimum": 0},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "AgentAnswer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract", "run_id", "status", "answer", "citations", "artifacts", "limitations"],
+      "properties": {
+        "contract": {"const": "agent_answer"},
+        "run_id": {"$ref": "#/$defs/Id"},
+        "status": {"enum": ["completed", "partial", "failed", "cancelled"]},
+        "answer": {"type": "string", "minLength": 1},
+        "citations": {"type": "array", "items": {"$ref": "#/$defs/Source"}},
+        "artifacts": {"type": "array", "items": {"$ref": "#/$defs/Artifact"}},
+        "limitations": {"type": "array", "items": {"type": "string", "minLength": 1}}
+      },
+      "allOf": [
+        {"if": {"properties": {"status": {"enum": ["partial", "failed", "cancelled"]}}}, "then": {"properties": {"limitations": {"minItems": 1}}}}
+      ]
+    },
+    "ToolError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "retryable"],
+      "properties": {
+        "code": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]+$"},
+        "message": {"type": "string", "minLength": 1},
+        "retryable": {"type": "boolean"}
+      }
+    },
+    "ToolResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract", "status", "data", "source_ids", "artifact_ids", "error", "truncated", "synthetic"],
+      "properties": {
+        "contract": {"const": "tool_result"},
+        "status": {"enum": ["ok", "error", "partial"]},
+        "data": {},
+        "source_ids": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/Id"}},
+        "artifact_ids": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/Id"}},
+        "error": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/ToolError"}]},
+        "truncated": {"type": "boolean"},
+        "synthetic": {"type": "boolean"}
+      },
+      "allOf": [
+        {"if": {"properties": {"status": {"const": "error"}}}, "then": {"properties": {"error": {"$ref": "#/$defs/ToolError"}}}},
+        {"if": {"properties": {"status": {"const": "ok"}}}, "then": {"properties": {"error": {"type": "null"}}}}
+      ]
+    },
+    "ApprovalDecision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract", "decision", "action_hash", "expected_version"],
+      "properties": {
+        "contract": {"const": "approval_decision"},
+        "decision": {"enum": ["approve", "edit", "reject"]},
+        "action_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "expected_version": {"type": "integer", "minimum": 1},
+        "edited_args": {"type": "object"},
+        "reason": {"type": "string", "maxLength": 2000}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"decision": {"const": "edit"}}},
+          "then": {"required": ["edited_args"]},
+          "else": {"not": {"required": ["edited_args"]}}
+        }
+      ]
+    }
+  }
+}
