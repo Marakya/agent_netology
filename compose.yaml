@@ -1,0 +1,41 @@
+services:
+  streamlit:
+    profiles: ["streamlit"]
+    build: .
+    command: ["/opt/venv/bin/streamlit", "run", "streamlit_app.py", "--server.address", "0.0.0.0", "--server.port", "8501"]
+    environment:
+      AGENT_API_URL: http://app:8000
+    ports:
+      - "127.0.0.1:8501:8501"
+    depends_on:
+      app:
+        condition: service_healthy
+    restart: unless-stopped
+  app:
+    build: .
+    ports:
+      - "127.0.0.1:8000:8000"
+    env_file: .env
+    environment:
+      DATA_DIR: /data
+      QDRANT_URL: http://qdrant:6333
+      APP_TOKEN: ${APP_TOKEN:?Set APP_TOKEN in .env before Docker startup}
+    volumes:
+      - app_data:/data
+    depends_on:
+      qdrant:
+        condition: service_started
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "/opt/venv/bin/python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+  qdrant:
+    image: qdrant/qdrant:v1.14.1
+    volumes:
+      - qdrant_data:/qdrant/storage
+    restart: unless-stopped
+volumes:
+  app_data:
+  qdrant_data:
