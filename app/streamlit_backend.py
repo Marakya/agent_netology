@@ -1,4 +1,4 @@
-"""One local API process shared by Streamlit sessions; no session data is cached."""
+"""API внутри процесса Streamlit: один сервер на все сессии, данные сессий не кэшируются."""
 
 import atexit
 import os
@@ -15,6 +15,8 @@ from .main import create_app
 
 
 class LocalBackend:
+    """Запускает FastAPI в фоновом потоке на случайном порту localhost."""
+
     def __init__(self):
         settings = Settings()
         address = st.get_option("server.address")
@@ -48,6 +50,7 @@ def local_backend():
 
 
 def backend_url():
+    """Адрес API: внешний из AGENT_API_URL либо встроенный сервер."""
     return os.environ.get("AGENT_API_URL", "").rstrip("/") or local_backend().url
 
 
@@ -56,6 +59,7 @@ class ApiError(Exception):
 
 
 def request_api(base_url, token, method, path, **kwargs):
+    """HTTP-запрос к API. Любая ошибка превращается в ApiError с понятным текстом."""
     headers = kwargs.pop("headers", {})
     if token:
         headers["Authorization"] = "Bearer " + token

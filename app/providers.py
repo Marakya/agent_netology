@@ -1,3 +1,5 @@
+"""Внешние провайдеры: безопасное чтение веб-страниц, поиск Tavily, артефакты, песочница E2B."""
+
 import hashlib
 import http.client
 import mimetypes
@@ -6,7 +8,7 @@ import ssl
 import threading
 import time
 from html.parser import HTMLParser
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from urllib.parse import urljoin, urlunsplit
 
 import httpx
@@ -17,6 +19,8 @@ from .security import public_url, safe_external_query, workspace_path
 
 
 class TextExtractor(HTMLParser):
+    """Текст HTML-страницы без script/style."""
+
     def __init__(self):
         super().__init__()
         self.skip, self.parts = 0, []
@@ -37,7 +41,12 @@ class TextExtractor(HTMLParser):
 
 
 def fetch_public(url):
-    """Validate all DNS answers, then connect to that exact IP (no second DNS lookup)."""
+    """Прочитать публичную страницу и вернуть её как источник (kind="web").
+
+    Защита от SSRF: все DNS-ответы проверяются (public_url), соединение идёт на проверенный
+    IP без повторного DNS-запроса. Каждый редирект проверяется заново. Лимиты: 20 секунд
+    на всё, 3 редиректа, 2 MiB, только текстовые типы.
+    """
     deadline = time.monotonic() + 20
     for _ in range(4):
         parts, addresses = public_url(url)
@@ -119,6 +128,7 @@ def fetch_public(url):
 
 
 def search_web(settings, query):
+    """Поиск Tavily. Сниппеты — не доказательства: страницу нужно прочитать через web_fetch."""
     if not settings.tavily_api_key.get_secret_value():
         raise ValueError("Интернет-поиск не подключён: задайте TAVILY_API_KEY")
     response = httpx.post(
@@ -135,6 +145,8 @@ def search_web(settings, query):
 
 
 class ArtifactStore:
+    """Файлы приложения в DATA_DIR/artifacts: на диске под случайным id, метаданные в SQLite."""
+
     def __init__(self, settings, db):
         self.root, self.db = settings.data_dir / "artifacts", db
 
@@ -170,11 +182,14 @@ class ArtifactStore:
 
 
 class SandboxManager:
+    """Песочницы E2B: одна на задачу, без сети, удаляется при завершении задачи."""
+
     def __init__(self, settings, db, artifacts):
         self.settings, self.db, self.artifacts = settings, db, artifacts
         self.lock, self.instances = threading.RLock(), {}
 
     def get(self, run_id, owner):
+        """Песочница задачи; при первом обращении создаётся и получает загруженные файлы владельца."""
         if not self.settings.e2b_api_key.get_secret_value():
             raise ValueError("Sandbox не подключён: задайте E2B_API_KEY. Код на хосте не выполняется.")
         with self.lock:
@@ -191,8 +206,6 @@ class SandboxManager:
                 for row in self.db.all("SELECT * FROM artifacts WHERE owner=? AND run_id IS NULL", (owner,))[
                     -10:
                 ]:
-                    from pathlib import Path
-
                     sbx.files.write(
                         f"/workspace/input/{row['id']}_{row['name']}", Path(row["path"]).read_bytes()
                     )
@@ -213,7 +226,7 @@ class SandboxManager:
 
     def files(self, run_id, owner, operation, path, content="", pattern="", offset=0, limit=100):
         path = workspace_path(path)
-        # All path checks execute inside the remote sandbox too, preventing symlink escape.
+        # Путь проверяется и здесь, и внутри песочницы после resolve(): symlink не выведет из /workspace.
         program = """
 import pathlib, json, glob as glob_module
 p = pathlib.Path(PATH).resolve()
@@ -250,9 +263,10 @@ elif OP in ('glob','grep'):
         return self.python(run_id, owner, prefix + "\n" + program)
 
     def export(self, run_id, owner, path):
+        """Скопировать файл из песочницы в хранилище артефактов."""
         path = workspace_path(path)
         sbx = self.get(run_id, owner)
-        # Check no symlink and bound size before downloading. The run is serialized.
+        # До скачивания проверяем в песочнице: не symlink, внутри /workspace, не больше 20 MiB.
         result = sbx.run_code(
             "from pathlib import Path\np=Path(" + repr(path) + ")\n"
             "assert p.resolve().is_relative_to(Path('/workspace')) and not p.is_symlink()\n"

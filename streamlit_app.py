@@ -1,4 +1,4 @@
-"""Streamlit UI over the same authenticated FastAPI / LangGraph backend."""
+"""Интерфейс Streamlit. Вся логика — в API (app/api); здесь только отображение и вызовы HTTP."""
 
 import json
 import uuid
@@ -19,11 +19,12 @@ def get(path):
 
 
 def start(message):
+    """Отправить сообщение агенту: при необходимости создать беседу и запустить задачу."""
     thread_id = st.session_state.get("thread_id")
     if not thread_id:
         thread_id = api("POST", "/threads", json={"title": message[:80]}).json()["id"]
         st.session_state.thread_id = thread_id
-    # Keep the key across uncertain HTTP outcomes; a manual retry cannot duplicate the run.
+    # Ключ идемпотентности хранится до успешного ответа: повтор после сетевой ошибки не создаст дубль.
     pending = st.session_state.get("pending")
     if not pending or pending["message"] != message or pending["thread_id"] != thread_id:
         pending = {"message": message, "thread_id": thread_id, "key": uuid.uuid4().hex}
@@ -39,6 +40,7 @@ def start(message):
 
 
 def render_result(run):
+    """Итог задачи: карточка с редактируемым черновиком, источники, файлы, ограничения."""
     result = run.get("result") or {}
     case = result.get("support_case")
     if case:
@@ -70,6 +72,7 @@ def render_result(run):
 
 
 def render_approval(run):
+    """Форма решения человека по действию агента: подтвердить, изменить аргументы или отклонить."""
     for approval in run["approvals"]:
         st.warning("Подтвердите действие: " + approval["tool"])
         with st.form("approval_" + approval["id"]):
@@ -98,6 +101,7 @@ def render_approval(run):
 
 
 def render_log(run_id):
+    """Журнал действий агента по задаче."""
     journal = get(f"/runs/{run_id}/log")
     with st.expander("Журнал действий агента", expanded=True):
         st.caption(f"Задача: {run_id} · время UTC · событий: {journal['total']}")
@@ -127,6 +131,7 @@ def render_log(run_id):
 
 @st.fragment(run_every="1s")
 def progress(run_id):
+    """Фрагмент, который раз в секунду обновляет состояние выполняющейся задачи."""
     try:
         run = get("/runs/" + run_id)
         st.info(
@@ -153,7 +158,7 @@ def main():
                 "Токен доступа (APP_TOKEN)", type="password", value=st.session_state.get("token", "")
             )
             if st.form_submit_button("Подключиться"):
-                # Clear drafts, files and selected objects when changing identities.
+                # При смене пользователя сбрасываем всё состояние сессии: черновики, выбранную беседу.
                 st.session_state.clear()
                 st.session_state.token = token
                 st.rerun()

@@ -1,3 +1,5 @@
+"""Настройки приложения. Полный список переменных с пояснениями — в .env.example."""
+
 from pathlib import Path
 from typing import Literal
 
@@ -9,6 +11,7 @@ class Settings(BaseSettings):
     """Настройки из переменных окружения / .env. Агент всегда работает с реальной LLM."""
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    # Каталог данных и доступ к API.
     data_dir: Path = Path("data")
     app_token: SecretStr = SecretStr("")
     app_users_json: SecretStr = SecretStr("")
@@ -39,6 +42,7 @@ class Settings(BaseSettings):
     run_timeout_seconds: int = Field(default=300, ge=5, le=1800)
 
     def prepare(self):
+        """Проверить обязательные настройки и создать каталоги данных (вызывается при старте)."""
         if not self.openai_api_key.get_secret_value():
             raise ValueError("Задайте OPENAI_API_KEY (или ключ совместимого провайдера) в .env.")
         self.data_dir = self.data_dir.resolve()

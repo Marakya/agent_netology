@@ -1,4 +1,8 @@
-"""Deep Agents adapter. All execution is in an E2B sandbox, with a shared root budget."""
+"""Адаптер Deep Agents (инструмент deep_analyze).
+
+Многошаговый анализ выполняется целиком в песочнице E2B. Вызовы модели и инструментов
+вложенного агента учитываются в бюджете родительской задачи через RootBudgetCallback.
+"""
 
 import json
 import time
@@ -10,6 +14,8 @@ from .db import BudgetExceeded, dumps
 
 
 class RootBudgetCallback(BaseCallbackHandler):
+    """Callback LangChain: списывает вызовы вложенного агента из бюджета родительской задачи."""
+
     raise_error = True
 
     def __init__(self, settings, db, run_id):
@@ -38,7 +44,7 @@ class RootBudgetCallback(BaseCallbackHandler):
 
     def on_tool_start(self, serialized, input_str, *, run_id, **kwargs):
         name = serialized.get("name", "unknown")
-        # No nested task spawning: the outer Coordinator already owns delegation.
+        # Белый список: делегирование (task) запрещено, им управляет только внешний агент.
         if name not in {
             "ls",
             "read_file",
@@ -55,6 +61,8 @@ class RootBudgetCallback(BaseCallbackHandler):
 
 
 def run_deep_analysis(settings, db, manager, context, task):
+    """Запустить Deep Agents в песочнице задачи и экспортировать файлы из /workspace/output."""
+    # Импорты внутри функции: зависимости тяжёлые и нужны только при вызове deep_analyze.
     from deepagents import create_deep_agent
     from langchain_e2b import E2BSandbox
     from langchain_openai import ChatOpenAI

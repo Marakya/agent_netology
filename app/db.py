@@ -1,3 +1,10 @@
+"""SQLite-хранилище приложения: беседы, задачи, события, память, документы, заявки.
+
+Одно соединение на процесс, все обращения сериализуются через RLock (Database.lock).
+Здесь же счётчики бюджета задачи (reserve / reserve_tool) и версионируемая память.
+Checkpoint графа LangGraph хранится отдельно — в checkpoints.sqlite (см. engine.py).
+"""
+
 import hashlib
 import json
 import sqlite3
@@ -10,18 +17,50 @@ from pathlib import Path
 from .action_log import ActionLog
 
 
+class BudgetExceeded(RuntimeError):
+    """Исчерпан бюджет задачи (вызовы модели, инструментов, токены или время)."""
+
+
+class MemoryConflict(ValueError):
+    """Запись памяти изменилась с момента, когда её видел автор изменения."""
+
+
 def uid():
+    """Новый идентификатор объекта."""
     return uuid.uuid4().hex
 
 
 def dumps(value):
+    """Детерминированный JSON: одинаковые данные дают одинаковую строку (нужно для hash)."""
     return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
 
 
 def digest(value):
+    """SHA-256 от детерминированного JSON: ключи идемпотентности и hash действий."""
     return hashlib.sha256(dumps(value).encode()).hexdigest()
 
 
+# Лимиты вызовов отдельных инструментов на одну задачу (сверх общего MAX_TOOL_CALLS).
+TOOL_CALL_LIMITS = {
+    "web_search": 4,
+    "web_fetch": 6,
+    "run_python": 5,
+    "execute": 5,
+    "task": 3,
+    "deep_analyze": 1,
+}
+
+# Таблицы:
+#   threads, messages  — беседы и видимая история (сообщения пользователя и ответы агента);
+#   runs               — задачи: статус, счётчики бюджета, результат, флаг отмены, решение для resume;
+#   events             — журнал событий задачи (источник для SSE и журнала действий);
+#   memories           — подтверждённая память владельца (версии — в memory_revisions);
+#   documents, chunks  — документы базы знаний и их фрагменты (векторы лежат в Qdrant);
+#   approvals          — предложения действий, ожидающие решения человека;
+#   effects            — результаты инструментов по ключу идемпотентности;
+#   artifacts          — файлы: загруженные исходники и созданные отчёты;
+#   tickets            — локальный реестр заявок.
+# Индекс one_active_run гарантирует не больше одной активной задачи в беседе.
 SCHEMA = """
 PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
@@ -58,6 +97,12 @@ class Database:
         self.conn = sqlite3.connect(str(path), check_same_thread=False, timeout=30)
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(SCHEMA)
+        self.migrate()
+        self.conn.commit()
+        self.action_log = ActionLog(Path(path).parent / "logs")
+
+    def migrate(self):
+        """Дополнения схемы, появившиеся позже: применяются и к новым, и к существующим базам."""
         columns = {r[1] for r in self.conn.execute("PRAGMA table_info(runs)")}
         for name in ("active_seconds", "started_at"):
             if name not in columns:
@@ -77,11 +122,10 @@ class Database:
           PRIMARY KEY(memory_id,version))""")
         self.conn.execute("""INSERT OR IGNORE INTO memory_revisions
           SELECT id,version,owner,key,value,source,updated,NULL FROM memories""")
-        self.conn.commit()
-        self.action_log = ActionLog(Path(path).parent / "logs")
 
     @contextmanager
     def transaction(self):
+        """Несколько операций одной транзакцией: commit при успехе, rollback при любой ошибке."""
         with self.lock:
             try:
                 yield self.conn
@@ -104,6 +148,7 @@ class Database:
             return [dict(row) for row in self.conn.execute(sql, args).fetchall()]
 
     def event(self, run_id, event_type, payload):
+        """Записать событие задачи в SQLite и в файловый журнал действий."""
         created = time.time()
         with self.transaction() as conn:
             event_id = conn.execute(
@@ -112,13 +157,12 @@ class Database:
             ).lastrowid
         self.action_log.write(run_id, event_type, payload, created, event_id)
 
-    def message(self, thread_id, role, content, message_id=None):
-        self.execute(
-            "INSERT OR IGNORE INTO messages VALUES(?,?,?,?,?)",
-            (message_id or uid(), thread_id, role, content, time.time()),
-        )
-
     def reserve(self, run_id, kind, limit, tokens=0, token_limit=48000):
+        """Зарезервировать в бюджете задачи один вызов (model/tool) и токены.
+
+        Проверка и увеличение счётчиков идут одной транзакцией, поэтому параллельные
+        вызовы не могут превысить лимит.
+        """
         column = {"model": "model_calls", "tool": "tool_calls"}[kind]
         with self.transaction() as conn:
             row = conn.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
@@ -132,14 +176,7 @@ class Database:
         return self.all("SELECT * FROM memories WHERE owner=? ORDER BY updated DESC LIMIT 50", (owner,))
 
     def reserve_tool(self, run_id, name, total_limit):
-        limits = {
-            "web_search": 4,
-            "web_fetch": 6,
-            "run_python": 5,
-            "execute": 5,
-            "task": 3,
-            "deep_analyze": 1,
-        }
+        """Учесть вызов инструмента: общий лимит задачи и лимит конкретного инструмента."""
         with self.transaction() as conn:
             row = conn.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
             if not row or row["cancel"]:
@@ -147,7 +184,9 @@ class Database:
             usage = conn.execute(
                 "SELECT calls FROM tool_usage WHERE run_id=? AND name=?", (run_id, name)
             ).fetchone()
-            if row["tool_calls"] >= total_limit or (usage and usage[0] >= limits.get(name, total_limit)):
+            if row["tool_calls"] >= total_limit or (
+                usage and usage[0] >= TOOL_CALL_LIMITS.get(name, total_limit)
+            ):
                 raise BudgetExceeded("Исчерпан бюджет инструмента: " + name)
             conn.execute("UPDATE runs SET tool_calls=tool_calls+1 WHERE id=?", (run_id,))
             conn.execute(
@@ -156,6 +195,12 @@ class Database:
             )
 
     def save_memory(self, owner, key, value, source, expected_version=0, mutation_id=None):
+        """Сохранить запись памяти с оптимистичной блокировкой.
+
+        expected_version — версия, которую видел автор изменения (0 — записи ещё нет);
+        несовпадение даёт MemoryConflict. mutation_id делает операцию идемпотентной:
+        повтор с тем же идентификатором возвращает уже созданную версию.
+        """
         with self.transaction() as conn:
             if mutation_id:
                 previous = conn.execute(
@@ -187,11 +232,3 @@ class Database:
         with self.lock:
             self.conn.close()
             self.action_log.close()
-
-
-class BudgetExceeded(RuntimeError):
-    pass
-
-
-class MemoryConflict(ValueError):
-    pass

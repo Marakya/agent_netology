@@ -10,7 +10,7 @@
 
 Стек: LangChain/LangGraph, OpenAI (LLM + embeddings), Qdrant (гибридный поиск), FastAPI, SQLite, Streamlit.
 
-**[Архитектура и устройство агента — spec.md](spec.md)**
+**[Спецификация: что делает агент и как он устроен — spec.md](spec.md)**
 
 ## Быстрый старт
 
@@ -55,7 +55,22 @@ uv run streamlit run streamlit_app.py
 |---|---|
 | `rag_search`, `list_knowledge_documents`, `publish_support_draft`, `create_ticket`*, `read_memory`, `save_memory`*, `save_report`, `query_dataset`, `write_todos`, `task`, `web_fetch` | `web_search` (`TAVILY_API_KEY`); `run_python`*, `execute`*, `files`, `edit_file`, `export_file`, `deep_analyze`* (`E2B_API_KEY`) |
 
-\* требуют подтверждения человеком. Подробности, проверки и бюджеты описаны в [spec.md](spec.md#34-инструменты).
+\* требуют подтверждения человеком. Подробности, проверки и бюджеты описаны в [spec.md](spec.md#54-инструменты).
+
+## Структура кода
+
+| Путь | Содержимое |
+|---|---|
+| `app/main.py` | Точка входа: сборка сервисов и приложения FastAPI |
+| `app/api/` | REST API: беседы, задачи, документы, память |
+| `app/engine.py`, `app/langchain_agent.py`, `app/prompts.py` | Агент: жизненный цикл задачи, цикл LangChain, промпты |
+| `app/tools.py`, `app/support.py` | Инструменты агента и карточка поддержки |
+| `app/rag.py` | База знаний: индексация и гибридный поиск |
+| `app/db.py`, `app/providers.py`, `app/security.py` | Хранилище, внешние провайдеры, защитные проверки |
+| `streamlit_app.py`, `app/static/` | Интерфейсы |
+| `tests/` | Автотесты |
+
+Подробная карта модулей и инструкция «как добавить инструмент» — в [spec.md](spec.md#41-структура-репозитория).
 
 ## Конфигурация
 
@@ -103,7 +118,7 @@ uv run ruff check app tests
 node --test tests/test_ui.cjs
 ```
 
-Тесты подменяют `ChatOpenAI` и `OpenAIEmbeddings` заглушками (`tests/conftest.py`). Агентный цикл LangChain, Qdrant, SQLite, checkpoint и подтверждения при этом настоящие. Подробности — в [spec.md](spec.md#10-тестирование).
+Тесты подменяют `ChatOpenAI` и `OpenAIEmbeddings` заглушками (`tests/conftest.py`). Агентный цикл LangChain, Qdrant, SQLite, checkpoint и подтверждения при этом настоящие. Подробности — в [spec.md](spec.md#12-тестирование).
 
 ## Если запуск не удался
 

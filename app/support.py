@@ -29,6 +29,7 @@ def update_ticket(case):
 
 
 def format_case(case):
+    """Текст карточки для истории беседы."""
     refs = " ".join(f"[{sid}]" for sid in case["source_ids"])
     return (
         f"{case['category']}\n\nЧерновик ответа покупателю:\n{case['draft']}\n\n"

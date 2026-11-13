@@ -1,4 +1,8 @@
-"""Allowlisted action metadata, shared by the UI journal and rotating JSONL file."""
+"""Журнал действий агента: технические метаданные событий без текстов запросов и ответов.
+
+Один формат записи (entry) используется и в API (GET /api/runs/{id}/log), и в файле
+DATA_DIR/logs/agent.jsonl. В запись попадают только поля из белого списка.
+"""
 
 import json
 import logging
@@ -31,11 +35,13 @@ LABELS = {
     "context.compacted": "Контекст сокращён",
     "sandbox.created": "Песочница создана",
 }
+# Белый список полей события. Строки дополнительно проверяются по шаблону «идентификатор».
 TEXT_KEYS = {"mode", "model", "name", "role", "status", "decision", "error_type"}
 NUMBER_KEYS = {"attempt", "tokens", "seconds", "removed_messages", "http_status", "source_count"}
 
 
 def safe_details(payload):
+    """Оставить из payload события только разрешённые поля; списки заменить их длиной."""
     result = {}
     if not isinstance(payload, dict):
         return result
@@ -56,6 +62,7 @@ def safe_details(payload):
 
 
 def entry(run_id, event_type, payload, created, event_id=None):
+    """Запись журнала: время, событие, русское название действия, уровень, безопасные детали."""
     details = safe_details(payload)
     level = "ERROR" if event_type.endswith("failed") else "INFO"
     if details.get("status") == "failed" or details.get("ok") is False:
@@ -74,6 +81,8 @@ def entry(run_id, event_type, payload, created, event_id=None):
 
 
 class ActionLog:
+    """Файловый журнал с ротацией (до 4 файлов по 2 MiB). Если файл недоступен, журнал остаётся в SQLite."""
+
     def __init__(self, directory):
         self.handler = None
         self.logger = logging.Logger("agent.actions", level=logging.INFO)

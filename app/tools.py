@@ -1,14 +1,35 @@
+"""Реестр инструментов агента.
+
+Модуль состоит из трёх частей:
+
+1. Pydantic-схемы аргументов. Из них строится JSON Schema, которую видит модель,
+   и по ним же аргументы проверяются перед выполнением.
+2. SPECS — единый реестр: имя инструмента → (схема аргументов, описание для модели).
+   Здесь же наборы: какие инструменты требуют подтверждения, какие нужны ключи,
+   что доступно специалистам.
+3. Toolbox — выполнение. Каждый инструмент реализован методом tool_<имя>(args, context).
+
+Чтобы добавить инструмент: опишите схему, добавьте запись в SPECS и метод tool_<имя>.
+Бюджет, подтверждения, идемпотентность и журнал обеспечивает Engine.execute_tool.
+"""
+
 import time
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from .db import uid
+from .deep import run_deep_analysis
 from .providers import fetch_public, search_web
 from .security import SECRET, workspace_path
+from .support import support_case
+
+# ---- Схемы аргументов ---------------------------------------------------------
 
 
 class Args(BaseModel):
+    """Базовая схема: лишние поля запрещены, чтобы модель не придумывала аргументы."""
+
     model_config = ConfigDict(extra="forbid")
 
 
@@ -95,6 +116,9 @@ class Empty(Args):
     pass
 
 
+# ---- Реестр -------------------------------------------------------------------
+
+# Имя → (схема аргументов, описание). Описания на английском: их читает модель.
 SPECS = {
     "list_knowledge_documents": (
         Empty,
@@ -163,15 +187,26 @@ SPECS = {
     ),
 }
 
+# Действия с побочным эффектом: выполняются только после подтверждения человеком.
 APPROVAL_TOOLS = {"save_memory", "create_ticket", "run_python", "execute", "deep_analyze"}
+# Инструменты песочницы: доступны только при заданном E2B_API_KEY.
+SANDBOX_TOOLS = {"run_python", "files", "edit_file", "execute", "export_file", "deep_analyze"}
+# Наборы инструментов специалистов (инструмент task).
 SPECIALIST_TOOLS = {
     "researcher": {"rag_search", "web_search", "web_fetch", "read_memory"},
     "analyst": {"rag_search", "run_python", "files", "edit_file", "export_file", "query_dataset"},
     "reviewer": {"rag_search", "read_memory"},
 }
+# query_dataset: только заранее заданные запросы с фильтром по владельцу, без произвольного SQL.
+DATASET_QUERIES = {
+    "documents": "SELECT name,state,chunks FROM documents WHERE owner=?",
+    "tickets": "SELECT id,title,created FROM tickets WHERE owner=?",
+    "usage": "SELECT id,status,model_calls,tool_calls,tokens FROM runs WHERE owner=? ORDER BY created DESC LIMIT 50",
+}
 
 
 def schemas(names):
+    """Описания инструментов в формате OpenAI function calling (для специалистов)."""
     return [
         {
             "type": "function",
@@ -185,20 +220,27 @@ def schemas(names):
     ]
 
 
+# ---- Выполнение ---------------------------------------------------------------
+
+
 class Toolbox:
+    """Выполняет инструменты."""
+
     def __init__(self, settings, db, rag, sandbox, artifacts):
         self.settings, self.db, self.rag, self.sandbox, self.artifacts = settings, db, rag, sandbox, artifacts
-        self.delegate = None
+        self.delegate = None  # Engine.specialist; задаётся движком, чтобы не было циклической зависимости
 
     def available(self, role="coordinator"):
+        """Имена инструментов, доступных роли при текущих ключах провайдеров."""
         names = set(SPECS) if role == "coordinator" else set(SPECIALIST_TOOLS[role])
         if not self.settings.tavily_api_key.get_secret_value():
             names.discard("web_search")
         if not self.settings.e2b_api_key.get_secret_value():
-            names -= {"run_python", "files", "edit_file", "execute", "export_file", "deep_analyze"}
+            names -= SANDBOX_TOOLS
         return sorted(names)
 
     def validate(self, name, args):
+        """Проверить аргументы по схеме. Ошибка — ValueError с текстом для модели."""
         if name not in SPECS:
             raise ValueError("Неизвестный инструмент")
         validated = SPECS[name][0].model_validate(args).model_dump()
@@ -207,106 +249,134 @@ class Toolbox:
         return validated
 
     def execute(self, name, args, context):
-        run_id, owner = context["run_id"], context["owner"]
-        if name == "list_knowledge_documents":
-            return {
-                "documents": self.db.all(
-                    "SELECT id,name,state,chunks FROM documents WHERE owner=? ORDER BY created DESC LIMIT 100",
-                    (owner,),
+        """Выполнить инструмент с уже проверенными аргументами.
+
+        context: run_id, owner, effect_id (ключ идемпотентности), sources (источники задачи).
+        Владелец и задача берутся только из context — модель не может их подменить.
+        """
+        handler = getattr(self, "tool_" + name, None) if name in SPECS else None
+        if handler is None:
+            raise ValueError("Инструмент не реализован")
+        return handler(args, context)
+
+    # -- База знаний и карточка поддержки --
+
+    def tool_rag_search(self, args, context):
+        return {"sources": self.rag.search(context["owner"], args["query"])}
+
+    def tool_list_knowledge_documents(self, args, context):
+        return {
+            "documents": self.db.all(
+                "SELECT id,name,state,chunks FROM documents WHERE owner=? ORDER BY created DESC LIMIT 100",
+                (context["owner"],),
+            )
+        }
+
+    def tool_publish_support_draft(self, args, context):
+        # Каждый source_id должен быть получен инструментом в этой задаче и указывать на готовый
+        # документ владельца: модель не может сослаться на выдуманный или чужой источник.
+        evidence = {s["source_id"]: s for s in context.get("sources", [])}
+        sources = []
+        for source_id in dict.fromkeys(args["source_ids"]):
+            source = evidence.get(source_id)
+            if (
+                not source
+                or source.get("kind") != "document"
+                or not self.db.one(
+                    "SELECT id FROM documents WHERE id=? AND owner=? AND state='ready'",
+                    (source.get("document_id"), context["owner"]),
                 )
-            }
-        if name == "publish_support_draft":
-            from .support import support_case
+            ):
+                raise ValueError("Источник не найден среди доступных документов текущей задачи")
+            sources.append(source)
+        if not sources and args["status"] != "manual_review":
+            raise ValueError("Без источников допустим только статус manual_review")
+        return {"support_case": support_case(args), "sources": sources, "published": True}
 
-            evidence = {s["source_id"]: s for s in context.get("sources", [])}
-            sources = []
-            for source_id in dict.fromkeys(args["source_ids"]):
-                source = evidence.get(source_id)
-                if (
-                    not source
-                    or source.get("kind") != "document"
-                    or not self.db.one(
-                        "SELECT id FROM documents WHERE id=? AND owner=? AND state='ready'",
-                        (source.get("document_id"), owner),
-                    )
-                ):
-                    raise ValueError("Источник не найден среди доступных документов текущей задачи")
-                sources.append(source)
-            if not sources and args["status"] != "manual_review":
-                raise ValueError("Без источников допустим только статус manual_review")
-            case = support_case(args)
-            return {"support_case": case, "sources": sources, "published": True}
-        if name == "deep_analyze":
-            from .deep import run_deep_analysis
+    def tool_create_ticket(self, args, context):
+        # effect_id как ключ заявки: повтор после перезапуска не создаст вторую запись.
+        ticket_id = context.get("effect_id", uid())
+        self.db.execute(
+            "INSERT OR IGNORE INTO tickets VALUES(?,?,?,?,?)",
+            (ticket_id, context["owner"], args["title"], args["body"], time.time()),
+        )
+        return {"ticket_id": ticket_id, "local_registry": True}
 
-            return run_deep_analysis(self.settings, self.db, self.sandbox, context, args["task"])
-        if name == "rag_search":
-            return {"sources": self.rag.search(owner, args["query"])}
-        if name == "web_search":
-            return {"results": search_web(self.settings, args["query"])}
-        if name == "web_fetch":
-            return {"sources": [fetch_public(args["url"])]}
-        if name == "read_memory":
-            return {"memories": self.db.memory(owner)}
-        if name == "save_memory":
-            saved = self.db.save_memory(
-                owner,
-                args["key"],
-                args["value"],
-                run_id,
-                expected_version=args.get("expected_version") or 0,
-                mutation_id=context.get("effect_id"),
-            )
-            return {"saved": True, "key": args["key"], "version": saved["version"]}
-        if name == "create_ticket":
-            ticket_id = context.get("effect_id", uid())
-            self.db.execute(
-                "INSERT OR IGNORE INTO tickets VALUES(?,?,?,?,?)",
-                (ticket_id, owner, args["title"], args["body"], time.time()),
-            )
-            return {"ticket_id": ticket_id, "local_registry": True}
-        if name == "write_todos":
-            self.db.event(run_id, "plan.updated", {"tasks": args["tasks"]})
-            return {"tasks": args["tasks"]}
-        if name == "query_dataset":
-            query = {
-                "documents": "SELECT name,state,chunks FROM documents WHERE owner=?",
-                "tickets": "SELECT id,title,created FROM tickets WHERE owner=?",
-                "usage": "SELECT id,status,model_calls,tool_calls,tokens FROM runs WHERE owner=? ORDER BY created DESC LIMIT 50",
-            }[args["query_name"]]
-            return {"rows": self.db.all(query, (owner,))[:100]}
-        if name == "save_report":
-            return {
-                "artifacts": [self.artifacts.save(owner, run_id, args["filename"], args["content"].encode())]
-            }
-        if name == "task":
-            return self.delegate(args["role"], args["task"], context)
-        if name == "run_python":
-            return self.sandbox.python(run_id, owner, args["code"])
-        if name == "files":
-            return self.sandbox.files(run_id, owner, **args)
-        if name == "execute":
-            result = self.sandbox.get(run_id, owner).commands.run(args["command"], timeout=60)
-            return {
-                "stdout": result.stdout[:100000],
-                "stderr": result.stderr[:10000],
-                "exit_code": result.exit_code,
-            }
-        if name == "edit_file":
-            path = workspace_path(args["path"])
-            code = (
-                "from pathlib import Path\np=Path(" + repr(path) + ").resolve()\n"
-                "assert p.is_relative_to(Path('/workspace'))\n"
-                "s=p.read_text()\nold="
-                + repr(args["old_string"])
-                + "\nnew="
-                + repr(args["new_string"])
-                + "\n"
-                "assert old in s\n"
-                + ("assert s.count(old)==1\n" if not args["replace_all"] else "")
-                + "p.write_text(s.replace(old,new))\nprint('updated')"
-            )
-            return self.sandbox.python(run_id, owner, code)
-        if name == "export_file":
-            return {"artifacts": [self.sandbox.export(run_id, owner, args["path"])]}
-        raise ValueError("Инструмент не реализован")
+    # -- Память --
+
+    def tool_read_memory(self, args, context):
+        return {"memories": self.db.memory(context["owner"])}
+
+    def tool_save_memory(self, args, context):
+        saved = self.db.save_memory(
+            context["owner"],
+            args["key"],
+            args["value"],
+            context["run_id"],
+            expected_version=args.get("expected_version") or 0,
+            mutation_id=context.get("effect_id"),
+        )
+        return {"saved": True, "key": args["key"], "version": saved["version"]}
+
+    # -- План, отчёты, данные, делегирование --
+
+    def tool_write_todos(self, args, context):
+        self.db.event(context["run_id"], "plan.updated", {"tasks": args["tasks"]})
+        return {"tasks": args["tasks"]}
+
+    def tool_save_report(self, args, context):
+        artifact = self.artifacts.save(
+            context["owner"], context["run_id"], args["filename"], args["content"].encode()
+        )
+        return {"artifacts": [artifact]}
+
+    def tool_query_dataset(self, args, context):
+        return {"rows": self.db.all(DATASET_QUERIES[args["query_name"]], (context["owner"],))[:100]}
+
+    def tool_task(self, args, context):
+        return self.delegate(args["role"], args["task"], context)
+
+    # -- Интернет --
+
+    def tool_web_search(self, args, context):
+        return {"results": search_web(self.settings, args["query"])}
+
+    def tool_web_fetch(self, args, context):
+        return {"sources": [fetch_public(args["url"])]}
+
+    # -- Песочница E2B (код никогда не выполняется на хосте) --
+
+    def tool_run_python(self, args, context):
+        return self.sandbox.python(context["run_id"], context["owner"], args["code"])
+
+    def tool_execute(self, args, context):
+        sandbox = self.sandbox.get(context["run_id"], context["owner"])
+        result = sandbox.commands.run(args["command"], timeout=60)
+        return {
+            "stdout": result.stdout[:100000],
+            "stderr": result.stderr[:10000],
+            "exit_code": result.exit_code,
+        }
+
+    def tool_files(self, args, context):
+        return self.sandbox.files(context["run_id"], context["owner"], **args)
+
+    def tool_edit_file(self, args, context):
+        path = workspace_path(args["path"])
+        # Скрипт выполняется в песочнице; значения подставляются через repr, а путь повторно
+        # проверяется после resolve(), чтобы symlink не вывел за пределы /workspace.
+        code = (
+            "from pathlib import Path\np=Path(" + repr(path) + ").resolve()\n"
+            "assert p.is_relative_to(Path('/workspace'))\n"
+            "s=p.read_text()\nold=" + repr(args["old_string"]) + "\nnew=" + repr(args["new_string"]) + "\n"
+            "assert old in s\n"
+            + ("assert s.count(old)==1\n" if not args["replace_all"] else "")
+            + "p.write_text(s.replace(old,new))\nprint('updated')"
+        )
+        return self.sandbox.python(context["run_id"], context["owner"], code)
+
+    def tool_export_file(self, args, context):
+        return {"artifacts": [self.sandbox.export(context["run_id"], context["owner"], args["path"])]}
+
+    def tool_deep_analyze(self, args, context):
+        return run_deep_analysis(self.settings, self.db, self.sandbox, context, args["task"])

@@ -1,3 +1,10 @@
+"""База знаний (RAG): разбор документов, индексация и гибридный поиск в Qdrant.
+
+Индексация: файл → текстовые секции → фрагменты с перекрытием → dense-вектор (OpenAI
+embeddings) + sparse-вектор (частоты слов) → точки в Qdrant, текст дублируется в SQLite.
+Поиск: dense- и sparse-кандидаты сливаются через RRF, результат фильтруется по владельцу.
+"""
+
 import hashlib
 import io
 import re
@@ -13,26 +20,43 @@ from qdrant_client import QdrantClient, models
 
 from .db import uid
 
+MAX_FILE_BYTES = 10 * 1024 * 1024  # лимит загружаемого файла
+MAX_UNPACKED_BYTES = 50 * 1024 * 1024  # лимит распакованного DOCX/PPTX (защита от zip-бомбы)
+MAX_PDF_PAGES = 500
+MAX_CHUNKS = 1500  # фрагментов на документ
+CHUNK_SIZE = 2400  # длина фрагмента, символы
+CHUNK_STEP = 2000  # шаг нарезки; соседние фрагменты перекрываются на CHUNK_SIZE - CHUNK_STEP
+EMBED_BATCH = 32  # фрагментов в одном запросе embeddings
+PREFETCH = 30  # кандидатов от каждого вида поиска (dense и sparse) до слияния
+
 
 def words(text):
+    """Слова текста в нижнем регистре (буквы и цифры любого языка)."""
     return re.findall(r"[\w]+", text.lower(), flags=re.UNICODE)
 
 
 def sparse(text):
+    """Лексический (sparse) вектор: индекс — хэш слова, значение — число вхождений.
+
+    blake2b вместо встроенного hash(): результат одинаков в разных процессах.
+    """
     counts = Counter(
         int.from_bytes(hashlib.blake2b(w.encode(), digest_size=4).digest(), "big") for w in words(text)
     )
-    # A stable lexical vector, independent of process hash randomization.
     return models.SparseVector(indices=sorted(counts), values=[float(counts[i]) for i in sorted(counts)])
 
 
 def parse_file(name, data):
+    """Извлечь текст из файла. Возвращает список секций (locator, text).
+
+    locator указывает место в документе (страница, слайд) и попадает в ссылку на источник.
+    """
     suffix = Path(name).suffix.lower()
     if suffix in {".txt", ".md", ".csv"}:
         return [("text", data.decode("utf-8-sig"))]
     if suffix in {".docx", ".pptx"}:
         with zipfile.ZipFile(io.BytesIO(data)) as archive:
-            if sum(i.file_size for i in archive.infolist()) > 50 * 1024 * 1024:
+            if sum(i.file_size for i in archive.infolist()) > MAX_UNPACKED_BYTES:
                 raise ValueError("Слишком большой распакованный документ")
             if suffix == ".pptx":
                 names = sorted(
@@ -60,7 +84,7 @@ def parse_file(name, data):
         from pypdf import PdfReader
 
         reader = PdfReader(io.BytesIO(data))
-        if len(reader.pages) > 500:
+        if len(reader.pages) > MAX_PDF_PAGES:
             raise ValueError("Лимит 500 страниц")
         return [(f"page {i + 1}", p.extract_text() or "") for i, p in enumerate(reader.pages)]
     raise ValueError("Поддерживаются TXT, MD, CSV, PDF, DOCX, PPTX")
@@ -104,7 +128,12 @@ class KnowledgeBase:
             self.client.create_payload_index(self.collection, "owner", models.PayloadSchemaType.KEYWORD)
 
     def ingest(self, owner, name, data):
-        if len(data) > 10 * 1024 * 1024:
+        """Проиндексировать документ владельца и вернуть его запись из SQLite.
+
+        Повторная загрузка того же содержимого (по SHA-256) возвращает существующий документ.
+        Статусы: indexing → ready, при ошибке — failed.
+        """
+        if len(data) > MAX_FILE_BYTES:
             raise ValueError("Максимальный размер 10 MiB")
         file_hash = hashlib.sha256(data).hexdigest()
         with self.lock:
@@ -116,14 +145,14 @@ class KnowledgeBase:
             sections = parse_file(name, data)
             chunks = []
             for locator, text in sections:
-                # Character chunks preserve original text and language; overlap keeps boundary context.
-                for offset in range(0, len(text), 2000):
-                    piece = text[offset : offset + 2400].strip()
+                # Нарезка по символам не зависит от языка; перекрытие сохраняет контекст на границах.
+                for offset in range(0, len(text), CHUNK_STEP):
+                    piece = text[offset : offset + CHUNK_SIZE].strip()
                     if piece:
                         chunks.append((f"{locator}, chars {offset}:{offset + len(piece)}", piece))
             if not chunks:
                 raise ValueError("Текст не найден. Для сканированного PDF нужен OCR.")
-            if len(chunks) > 1500:
+            if len(chunks) > MAX_CHUNKS:
                 raise ValueError("Документ превышает лимит 1500 фрагментов")
             doc_id = uid()
             self.db.execute(
@@ -131,8 +160,8 @@ class KnowledgeBase:
                 (doc_id, owner, Path(name).name, file_hash, "indexing", len(chunks), time.time()),
             )
             try:
-                for offset in range(0, len(chunks), 32):
-                    batch = chunks[offset : offset + 32]
+                for offset in range(0, len(chunks), EMBED_BATCH):
+                    batch = chunks[offset : offset + EMBED_BATCH]
                     vectors = self.embedder.embed_documents([t for _, t in batch])
                     points = []
                     for (locator, text), vector in zip(batch, vectors):
@@ -160,6 +189,7 @@ class KnowledgeBase:
             return self.db.one("SELECT * FROM documents WHERE id=?", (doc_id,))
 
     def search(self, owner, query, limit=6):
+        """Гибридный поиск по документам владельца. Возвращает до limit источников."""
         if not words(query):
             return []
         with self.lock:
@@ -170,14 +200,16 @@ class KnowledgeBase:
                 self.collection,
                 prefetch=[
                     models.Prefetch(
-                        query=self.embedder.embed_query(query), using="dense", filter=scope, limit=30
+                        query=self.embedder.embed_query(query), using="dense", filter=scope, limit=PREFETCH
                     ),
-                    models.Prefetch(query=sparse(query), using="lexical", filter=scope, limit=30),
+                    models.Prefetch(query=sparse(query), using="lexical", filter=scope, limit=PREFETCH),
                 ],
                 query=models.FusionQuery(fusion=models.Fusion.RRF),
                 query_filter=scope,
                 limit=20,
             )
+            # Индекс мог отстать от SQLite (документ удаляется или переиндексируется):
+            # берём только фрагменты, которые существуют и принадлежат готовому документу владельца.
             output = []
             for point in result.points:
                 row = self.db.one(
@@ -203,6 +235,7 @@ class KnowledgeBase:
             return output
 
     def delete(self, owner, doc_id):
+        """Удалить документ владельца из индекса и из SQLite (KeyError, если его нет)."""
         with self.lock:
             row = self.db.one("SELECT * FROM documents WHERE id=? AND owner=?", (doc_id, owner))
             if not row:

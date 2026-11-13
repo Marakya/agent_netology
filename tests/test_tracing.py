@@ -77,7 +77,9 @@ def traced(tmp_path, monkeypatch):
 def start(client, message, thread_id=None):
     thread_id = thread_id or client.post("/api/threads", json={"title": "t"}).json()["id"]
     run_id = client.post(
-        f"/api/threads/{thread_id}/runs", json={"message": message}, headers={"Idempotency-Key": uuid.uuid4().hex}
+        f"/api/threads/{thread_id}/runs",
+        json={"message": message},
+        headers={"Idempotency-Key": uuid.uuid4().hex},
     ).json()["id"]
     return thread_id, run_id
 

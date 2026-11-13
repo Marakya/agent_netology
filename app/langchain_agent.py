@@ -39,6 +39,8 @@ def agent_tools(engine):
 
 
 class ApplicationMiddleware(AgentMiddleware):
+    """Единственный middleware агента: связывает цикл LangChain с правилами приложения."""
+
     def __init__(self, engine):
         super().__init__()
         self.engine = engine
@@ -85,6 +87,7 @@ class ApplicationMiddleware(AgentMiddleware):
 
 
 def build_agent(engine, state_schema):
+    """Собрать агента. Результат — граф, который Engine встраивает узлом agent."""
     return create_agent(
         # Модель по умолчанию; на каждом шаге wrap_model_call подставляет нужную (fast/reasoning).
         model=engine.chat_model(engine.model_name()),

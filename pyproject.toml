@@ -1,7 +1,7 @@
 [project]
 name = "agent-netology"
 version = "0.1.0"
-description = "Persistent LangGraph research agent with Qdrant, web and remote sandbox"
+description = "Store support agent on LangChain/LangGraph with RAG (Qdrant) and human approval"
 requires-python = ">=3.11,<3.15"
 dependencies = [
   "fastapi>=0.115,<1",
